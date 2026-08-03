@@ -1,0 +1,8 @@
+{% extends "abridge/templates/index.html" %}
+
+{% block seo %}
+  {% set title_separator = " " ~ config.extra.title_separator ~ " " %}
+  {% set title = section.title | default(value="Writing") %}
+  {% set description = section.description | default(value=config.description) %}
+  {{ macros_seo::seo(config=config, title=title, title_addition=title_separator ~ config.title, description=description) }}
+{% endblock seo %}

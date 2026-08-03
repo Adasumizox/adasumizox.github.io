@@ -1,18 +1,87 @@
 base_url = "https://adasumizox.github.io/Threats-Threads"
-title = "Threats & Threads"
-description = "Simple blog about Cybersecurity, Tech & More"
-taxonomies = [{ name = "tags" }]
+title = "Daniel's Detection Notes"
+description = "Hands-on detection engineering notes by Daniel Jeczen: building EDR and SIEM labs, exploring Windows telemetry, and turning security events into useful detections."
+default_language = "en"
+theme = "abridge"
+compile_sass = true
+minify_html = true
+build_search_index = true
+generate_feeds = true
+taxonomies = [{ name = "tags", feed = true }]
 
-theme = "apollo"
+[link_checker]
+# LinkedIn returns a non-standard 999 response to automated link checkers.
+skip_prefixes = ["https://www.linkedin.com/"]
+
+[search]
+index_format = "elasticlunr_json"
+include_title = true
+include_description = true
+include_content = true
+
+[markdown]
+bottom_footnotes = true
+external_links_target_blank = true
+external_links_no_follow = false
+external_links_no_referrer = false
+smart_punctuation = true
+
+[markdown.highlighting]
+theme = "synthwave-84"
 
 [extra]
-theme = "auto"
-author = "Daniel Jeczen"
-socials = [
-    { name = "github", url = "https://github.com/adasumizox", icon = "github" },
-    { name = "linkedin", url = "https://www.linkedin.com/in/daniel-jeczen/", icon = "linkedin" }
-]
 menu = [
-    { name = "/posts", url = "/posts", weight = 1 },
-    { name = "/tags", url = "/tags", weight = 2 }
+    { url = "posts", name = "Writing", slash = true, blank = false, size = "s110" },
+    { url = "labs", name = "Labs", slash = true, blank = false, size = "s110" },
+    { url = "about", name = "About", slash = true, blank = false, size = "s110" },
+    { url = "tags", name = "Tags", slash = true, blank = false, size = "s110" },
 ]
+menu_footer = [
+    { url = "about", name = "About", slash = true, blank = false, size = "s90" },
+    { url = "posts", name = "Writing", slash = true, blank = false, size = "s90" },
+    { url = "atom.xml", name = "RSS", slash = false, blank = false, size = "s90" },
+    { url = "sitemap.xml", name = "Sitemap", slash = false, blank = false, size = "s90" },
+]
+
+toc = true
+recent = false
+series = true
+series_items = 10
+meta_index = { position = "bottom", size = "s90", author = false, readtime = true, readstring = "min read", date = true, updated = false, categories_tags = true, divider = "" }
+meta_post = { position = "top", size = "s95", author = true, readtime = true, readstring = "min read", date = true, updated = true, categories_tags = true, divider = "" }
+hide_section_dates = false
+hide_page_nextprev_titles = false
+title_size_index = "s90"
+footer_size = "s80"
+footer_credit = true
+textlogo = '<span class="brand-mark">D</span><span>etection Notes</span>'
+sitedesc = false
+headhr = false
+foothr = true
+copyright_override = '© $CURRENT_YEAR Daniel Jeczen'
+
+title_separator = "|"
+title_addition = "Detection Engineering, EDR & SIEM Labs"
+author = "Daniel Jeczen"
+keywords = "detection engineering, EDR, SIEM, Windows security, ETW, Sysmon, threat detection, cybersecurity labs"
+seo = true
+language_code = "en-GB"
+
+feed = true
+github = "adasumizox"
+linkedin = "daniel-jeczen"
+
+uglyurls = false
+integrity = true
+js_bundle = true
+js_copycode = true
+js_email_encode = false
+js_prestyle = true
+js_switcher = true
+js_switcher_default = "dark"
+search_library = "elasticlunr"
+stylesheets = ["abridge.css"]
+pwa = false
+
+favicon_theme_color = "#0b1220"
+favicon_ms_color = "#0b1220"

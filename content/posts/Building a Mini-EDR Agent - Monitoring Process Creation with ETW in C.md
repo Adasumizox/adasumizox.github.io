@@ -1,6 +1,11 @@
 +++
 title = "Building a Mini-EDR Agent - Monitoring Process Creation with ETW in C"
 date = "2026-03-26"
+description = "Build a small EDR-style process monitor in C using ETW, the Microsoft Windows Kernel Process provider, and TDH payload parsing."
+
+[extra]
+toc = true
+keywords = "ETW process monitoring, mini EDR agent, Windows kernel process provider, TDH, C security programming"
 
 [taxonomies]
 tags=["EDR", "Cybersecurity", "ETW", "Windows"]
@@ -90,11 +95,11 @@ logFile.EventRecordCallback = EventRecordCallback; // The function that handles 
 TRACEHANDLE hTrace = OpenTraceW(&logFile);
 
 printf("Listening for Process Starts... (Press Ctrl+C to stop)\n");
-status = ProcessTrace(&hTrace, 1, NULL, NULL)l // Blocks and process events
+status = ProcessTrace(&hTrace, 1, NULL, NULL); // Blocks and processes events
 ```
 
 ### Phase 4: Parsing the Payload with TDH
-Raw ETW data is unformatted binary payload. Parsing it manually is teribble. We also need to remember that with Windows update it could change and we need to modify our code once again. Thankfully, Microsoft provides the **Trace Data Helper (TDH)** API, which uses the provider's manifest to magically parse the binary payload into readable strings and integers.
+Raw ETW data is an unformatted binary payload. Parsing it manually is error-prone, and its layout can change with Windows updates. Thankfully, Microsoft provides the **Trace Data Helper (TDH)** API, which uses the provider's manifest to parse the binary payload into readable strings and integers.
 
 In our `EventRecordCallback`, we filter out noise and only look for Event ID `1` (Process Creation). We then use `TdhGetProperty` to extract specific fields like `ProcessID`, `ImageName`
 

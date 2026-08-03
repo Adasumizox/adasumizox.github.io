@@ -1,0 +1,51 @@
+@use '../themes/abridge/sass/abridge' with (
+  $mw: 76%,
+  $mb: 1180px,
+  $abridgeMode: "switcher",
+  $syntax-mode: "auto",
+  $switcherDefault: "dark",
+  $color: "blue",
+  $color-syntax: "abridge",
+  $syntax: true,
+  $enable-icons: true,
+  $ic: false,
+  $icon-rss: true,
+  $icon-linkedin: true,
+  $icon-github: true
+);
+
+:root {
+  --brand: #38bdf8;
+  --brand-strong: #0284c7;
+}
+
+.brand-mark { color: var(--brand); font-weight: 800; }
+
+.hero { padding: clamp(3rem, 8vw, 7rem) 0 clamp(2.5rem, 6vw, 5rem); max-width: 920px; }
+.eyebrow { color: var(--brand); font-size: .76rem; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
+.hero h1 { font-size: clamp(2.65rem, 7vw, 5.8rem); letter-spacing: -.055em; line-height: .98; margin: .55rem 0 1.4rem; }
+.hero-copy { font-size: clamp(1.05rem, 2vw, 1.28rem); line-height: 1.65; max-width: 720px; }
+.hero-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 1.25rem; margin-top: 2rem; }
+.primary-action { background: var(--brand-strong); border-radius: .35rem; color: #fff !important; font-weight: 700; padding: .75rem 1rem; text-decoration: none; }
+.primary-action:hover { filter: brightness(1.15); }
+
+.focus-grid { display: grid; gap: 1px; grid-template-columns: repeat(3, 1fr); margin-bottom: clamp(4rem, 8vw, 7rem); }
+.focus-grid article { border-top: 1px solid #64748b; padding: 1.5rem 1.25rem 1.5rem 0; }
+.focus-grid span, .post-row time, .post-row span { color: #64748b; font-size: .78rem; text-transform: uppercase; }
+.focus-grid h2 { font-size: 1.12rem; margin: 1.1rem 0 .45rem; }
+.focus-grid p { font-size: .94rem; margin: 0; }
+
+.latest { margin-bottom: clamp(4rem, 8vw, 7rem); }
+.section-heading { align-items: end; display: flex; justify-content: space-between; margin-bottom: 1rem; }
+.section-heading h2, .about-strip h2 { margin: .25rem 0 0; }
+.post-row { border-top: 1px solid #64748b; display: grid; gap: 2rem; grid-template-columns: minmax(130px, 1fr) 3fr; padding: 1.4rem 0; }
+.post-row > div:first-child { display: flex; flex-direction: column; gap: .3rem; }
+.post-row h3 { font-size: clamp(1.15rem, 2vw, 1.45rem); margin: 0 0 .4rem; }
+.post-row p { margin: 0; }
+.about-strip { border-block: 1px solid #64748b; display: grid; gap: 2rem; grid-template-columns: 1.4fr 1fr; margin-bottom: 3rem; padding: 2rem 0; }
+
+@media (max-width: 720px) {
+  .focus-grid { grid-template-columns: 1fr; }
+  .post-row, .about-strip { gap: .75rem; grid-template-columns: 1fr; }
+  .section-heading { align-items: start; flex-direction: column; gap: .5rem; }
+}

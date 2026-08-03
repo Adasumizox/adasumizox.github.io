@@ -1,6 +1,11 @@
 +++
 title = "Building a Mini-SIEM Lab: Sysmon, Vector, Redpanda, ClickHouse & Grafana"
 date = "2026-02-22"
+description = "Build a practical mini-SIEM pipeline from Windows Sysmon through Vector and Redpanda to ClickHouse and Grafana."
+
+[extra]
+toc = true
+keywords = "mini SIEM lab, Sysmon Vector, Redpanda ClickHouse, Grafana security monitoring, Windows event pipeline"
 
 [taxonomies] 
 tags=["SIEM", "Cybersecurity", "ClickHouse", "Vector", "Grafana", "Podman"] 

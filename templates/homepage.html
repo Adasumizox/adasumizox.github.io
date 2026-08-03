@@ -1,0 +1,42 @@
+{% extends "abridge/templates/base.html" %}
+
+{% block seo %}
+  {{ super() }}
+  {% set title_separator = " " ~ config.extra.title_separator ~ " " %}
+  {% set title_addition = title_separator ~ config.extra.title_addition %}
+  {{ macros_seo::seo(config=config, title=config.title, title_addition=title_addition, description=config.description, is_home=true) }}
+{% endblock seo %}
+
+{% block content %}
+  {% set posts = get_section(path="posts/_index.md") %}
+  <section class="hero" aria-labelledby="hero-title">
+    <p class="eyebrow">Detection engineering · Windows internals · Open-source labs</p>
+    <h1 id="hero-title">Build the telemetry.<br>Understand the detection.</h1>
+    <p class="hero-copy">Hands-on notes by Daniel Jeczen about EDR internals, SIEM pipelines, and the engineering between an endpoint event and an actionable signal.</p>
+    <p class="hero-actions">
+      <a class="primary-action" href="{{ get_url(path='@/posts/_index.md') }}">Explore the writing</a>
+      <a href="{{ get_url(path='@/labs.md') }}">Browse the labs →</a>
+    </p>
+  </section>
+
+  <section class="focus-grid" aria-label="Site focus">
+    <article><span>01</span><h2>Endpoint telemetry</h2><p>ETW, Sysmon, process activity, and the Windows signals behind EDR products.</p></article>
+    <article><span>02</span><h2>Detection systems</h2><p>Small, inspectable pipelines for collecting, shaping, storing, and querying security events.</p></article>
+    <article><span>03</span><h2>Build notes</h2><p>Code-first walkthroughs, operational trade-offs, and honest next steps for each experiment.</p></article>
+  </section>
+
+  <section class="latest" aria-labelledby="latest-title">
+    <div class="section-heading"><div><p class="eyebrow">From the notebook</p><h2 id="latest-title">Latest writing</h2></div><a href="{{ get_url(path='@/posts/_index.md') }}">View all writing →</a></div>
+    {% for page in posts.pages | slice(end=3) %}
+      <article class="post-row">
+        <div><time datetime="{{ page.date }}">{{ page.date | date(format="%d %b %Y") }}</time><span>{{ page.reading_time }} min read</span></div>
+        <div><h3><a href="{{ page.permalink }}">{{ page.title }}</a></h3><p>{{ page.description | default(value=page.summary | default(value="A practical detection engineering build note.")) }}</p></div>
+      </article>
+    {% endfor %}
+  </section>
+
+  <aside class="about-strip">
+    <div><p class="eyebrow">About this site</p><h2>Learn security systems by building smaller ones.</h2></div>
+    <p>I document experiments that make endpoint telemetry and detection infrastructure easier to reason about. <a href="{{ get_url(path='@/about.md') }}">More about Daniel →</a></p>
+  </aside>
+{% endblock content %}
