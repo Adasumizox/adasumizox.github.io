@@ -1,4 +1,4 @@
-base_url = "https://adasumizox.github.io/Threats-Threads"
+base_url = "https://adasumizox.github.io"
 title = "Daniel's Detection Notes"
 description = "Hands-on detection engineering notes by Daniel Jeczen: building EDR and SIEM labs, exploring Windows telemetry, and turning security events into useful detections."
 default_language = "en"

@@ -1,8 +1,8 @@
 # Articles
 
 All the files inside `content` directory are licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The attribution requirement is only met when:
-1. The canonical link is directed towards the original article, e.g. `<link rel="canonical" href="https://adasumizox.github.io/Threats-Threads/blogpost.html" />`
-2. The following message is displayed above and below the article: `This article has been originally published on <a href="https://adasumizox.github.io/Threats-Threads/">Daniel Jeczen's website</a>`.
+1. The canonical link is directed towards the original article, e.g. `<link rel="canonical" href="https://adasumizox.github.io/blogpost.html" />`
+2. The following message is displayed above and below the article: `This article has been originally published on <a href="https://adasumizox.github.io">Daniel Jeczen's website</a>`.
 
 # Other files
 
