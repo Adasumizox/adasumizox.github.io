@@ -44,8 +44,18 @@
 .post-row p { margin: 0; }
 .about-strip { border-block: 1px solid #64748b; display: grid; gap: 2rem; grid-template-columns: 1.4fr 1fr; margin-bottom: 3rem; padding: 2rem 0; }
 
+/* Prevent wide post content from widening the page. Grid and flex children
+   default to min-width:auto, which lets long commands escape their column. */
+main, article, section, .content, .post-row > * { min-width: 0; }
+.content { overflow-wrap: anywhere; }
+.content pre { max-width: 100%; overflow-x: auto; }
+.content pre code { overflow-wrap: normal; word-break: normal; }
+.content table { display: block; max-width: 100%; overflow-x: auto; }
+.content img, .content video, .content iframe { height: auto; max-width: 100%; }
+
 @media (max-width: 720px) {
   .focus-grid { grid-template-columns: 1fr; }
   .post-row, .about-strip { gap: .75rem; grid-template-columns: 1fr; }
   .section-heading { align-items: start; flex-direction: column; gap: .5rem; }
+  .content pre { border-radius: 0; font-size: .85rem; }
 }
