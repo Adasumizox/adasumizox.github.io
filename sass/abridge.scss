@@ -46,16 +46,31 @@
 
 /* Prevent wide post content from widening the page. Grid and flex children
    default to min-width:auto, which lets long commands escape their column. */
-main, article, section, .content, .post-row > * { min-width: 0; }
-.content { overflow-wrap: anywhere; }
-.content pre { max-width: 100%; overflow-x: auto; }
-.content pre code { overflow-wrap: normal; word-break: normal; }
-.content table { display: block; max-width: 100%; overflow-x: auto; }
-.content img, .content video, .content iframe { height: auto; max-width: 100%; }
+main, article, section, .post-row > * { min-width: 0; }
+
+/* Abridge renders page.content directly inside article (there is no
+   .content wrapper). Contain prose here and let only wide data scroll. */
+main > article { max-width: 100%; overflow-x: hidden; overflow-wrap: anywhere; }
+main > article pre {
+  box-sizing: border-box;
+  max-width: 100%;
+  overflow-x: auto;
+  width: 100%;
+}
+main > article pre > code {
+  display: block;
+  max-width: 100%;
+  min-width: 0;
+  overflow: visible;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+main > article table { display: block; max-width: 100%; overflow-x: auto; }
+main > article img, main > article video, main > article iframe { height: auto; max-width: 100%; }
 
 @media (max-width: 720px) {
   .focus-grid { grid-template-columns: 1fr; }
   .post-row, .about-strip { gap: .75rem; grid-template-columns: 1fr; }
   .section-heading { align-items: start; flex-direction: column; gap: .5rem; }
-  .content pre { border-radius: 0; font-size: .85rem; }
+  main > article pre { border-radius: 0; font-size: .85rem; }
 }
