@@ -1,7 +1,6 @@
 +++
 title = "How an Operating System Decides to Let You Watch It"
-date = "2026-08-10"
-draft = true
+date = "2026-08-05"
 description = "Windows, Linux, and macOS expose endpoint telemetry through three different trust models—and make sensor failures surface at different times."
 
 [extra]
