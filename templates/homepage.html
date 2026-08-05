@@ -9,6 +9,9 @@
 
 {% block content %}
   {% set posts = get_section(path="posts/_index.md") %}
+  {# Abridge lays out the direct children of <main> as grid items. Keep the
+     homepage as one grid item and manage its vertical layout ourselves. #}
+  <div class="homepage">
   <section class="hero" aria-labelledby="hero-title">
     <p class="eyebrow">Detection engineering · Windows internals · Open-source labs</p>
     <h1 id="hero-title">Build the telemetry.<br>Understand the detection.</h1>
@@ -39,4 +42,5 @@
     <div><p class="eyebrow">About this site</p><h2>Learn security systems by building smaller ones.</h2></div>
     <p>I document experiments that make endpoint telemetry and detection infrastructure easier to reason about. <a href="{{ get_url(path='@/about.md') }}">More about Daniel →</a></p>
   </aside>
+  </div>
 {% endblock content %}
