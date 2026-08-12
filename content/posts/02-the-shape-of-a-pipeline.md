@@ -1,6 +1,6 @@
 +++
 title = "The Shape of a Pipeline"
-date = "2026-08-1w"
+date = "2026-08-12"
 description = "Why endpoint telemetry pipelines converge on bounded queues, durable logs, replay, and idempotent consumers."
 
 [extra]
