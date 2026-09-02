@@ -1,0 +1,242 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en">
+    <title>Daniel&#x27;s Detection Notes - Telemetry</title>
+    <subtitle>Hands-on detection engineering notes by Daniel Jeczen: building EDR and SIEM labs, exploring Windows telemetry, and turning security events into useful detections.</subtitle>
+    <link rel="self" type="application/atom+xml" href="https://adasumizox.github.io/tags/telemetry/atom.xml"/>
+    <link rel="alternate" type="text/html" href="https://adasumizox.github.io"/>
+    <generator uri="https://www.getzola.org/">Zola</generator>
+    <updated>2026-08-12T00:00:00+00:00</updated>
+    <id>https://adasumizox.github.io/tags/telemetry/atom.xml</id>
+    <entry xml:lang="en">
+        <title>The Shape of a Pipeline</title>
+        <published>2026-08-12T00:00:00+00:00</published>
+        <updated>2026-08-12T00:00:00+00:00</updated>
+        
+        <author>
+          <name>
+            
+              Unknown
+            
+          </name>
+        </author>
+        
+        <link rel="alternate" type="text/html" href="https://adasumizox.github.io/posts/02-the-shape-of-a-pipeline/"/>
+        <id>https://adasumizox.github.io/posts/02-the-shape-of-a-pipeline/</id>
+        
+        <content type="html" xml:base="https://adasumizox.github.io/posts/02-the-shape-of-a-pipeline/">&lt;p&gt;&lt;em&gt;Building an EDR from scratch, essay 2 of 13.&lt;&#x2F;em&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;Once the three sensors from the last essay are producing events, a
+suspiciously boring problem appears: get the events to a server.&lt;&#x2F;p&gt;
+&lt;p&gt;I say suspiciously because everyone underestimates it, including me. It
+sounds like plumbing. It reads like a weekend of work. And then you sit
+down to write it and discover that you are re-deriving, from scratch, the
+same structure that sits inside Kafka, inside PostgreSQL’s WAL, inside
+&lt;code&gt;journald&lt;&#x2F;code&gt;, inside every message queue you’ve ever used, and — if you go
+back far enough — inside TCP.&lt;&#x2F;p&gt;
+&lt;p&gt;That convergence is the interesting thing. This essay is about why the
+shape is nearly forced, which decisions inside it are actually free, and
+the one place where I think the conventional answer is a lie people tell
+in marketing copy.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;three-things-you-can-do-when-you-can-t-keep-up&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#three-things-you-can-do-when-you-can-t-keep-up&quot; aria-label=&quot;Anchor link for: three-things-you-can-do-when-you-can-t-keep-up&quot;&gt;Three things you can do when you can’t keep up&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Start with the only situation that matters. Data is arriving faster than
+you can move it along. You have exactly three options, and there is no
+fourth:&lt;&#x2F;p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;Drop it.&lt;&#x2F;strong&gt; Throw away data. Fast, bounded, and lossy.&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;strong&gt;Buffer it.&lt;&#x2F;strong&gt; Hold it somewhere. Preserves data, and converts a
+throughput problem into a memory problem, which is a worse problem
+because it kills the whole process instead of one event.&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;strong&gt;Push back.&lt;&#x2F;strong&gt; Refuse to accept more until you’ve caught up, so the
+pressure propagates upstream to whoever is producing.&lt;&#x2F;li&gt;
+&lt;&#x2F;ol&gt;
+&lt;p&gt;Every stage of every pipeline picks one. A system’s character is entirely
+determined by which stage picks which, and the failure you get in
+production is always the failure of whichever stage picked &lt;em&gt;drop&lt;&#x2F;em&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;Here is the thing that took me longest to internalize: &lt;strong&gt;backpressure is
+not a way to avoid dropping data. It’s a way to choose where the dropping
+happens.&lt;&#x2F;strong&gt; If the producer is a kernel probe watching a machine that is
+compiling a large C++ project, the events exist whether or not anyone is
+ready. Pressure has to terminate somewhere. Pushing back moves the
+overflow up the chain; it doesn’t delete it.&lt;&#x2F;p&gt;
+&lt;p&gt;So the real design question isn’t “how do we never lose events.” It’s
+&lt;strong&gt;where do we want the loss, and can that place be honest about it?&lt;&#x2F;strong&gt;&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;putting-the-loss-where-it-can-be-counted&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#putting-the-loss-where-it-can-be-counted&quot; aria-label=&quot;Anchor link for: putting-the-loss-where-it-can-be-counted&quot;&gt;Putting the loss where it can be counted&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;The answer this agent settles on is stated as an invariant, and it’s the
+single most load-bearing sentence in the codebase: the kernel-adjacent ring
+is the only place allowed to drop events — and it counts what it drops.&lt;&#x2F;p&gt;
+&lt;p&gt;Both halves matter, and the second half is the one people forget.&lt;&#x2F;p&gt;
+&lt;p&gt;The kernel ring is the right place to lose data for unglamorous reasons.
+It is a fixed-size allocation that exists whether you like it or not. It
+sits at the boundary where the producer genuinely cannot be slowed down —
+you are not going to make a process-creation event wait while your
+userspace agent catches up, because that would mean the security tool is
+now a performance bottleneck in &lt;code&gt;fork()&lt;&#x2F;code&gt;, which is how you get uninstalled.
+And critically, the kernel gives you a drop counter for free, because it
+knows exactly how many times it failed to write.&lt;&#x2F;p&gt;
+&lt;p&gt;That last property is what turns a data loss into a &lt;em&gt;known&lt;&#x2F;em&gt; data loss, and
+the difference between those two is the whole ballgame. A pipeline that
+loses 4% of events and reports “everything is fine” is worse than useless
+— it’s actively misleading, because an analyst will interpret the absence
+of an event as evidence that nothing happened. A pipeline that loses 4% and
+says so lets you make a decision: add capacity, tune the filters, or accept
+the gap knowingly.&lt;&#x2F;p&gt;
+&lt;p&gt;Everything downstream of the ring, therefore, is forbidden from dropping.
+It must push back instead. You can watch the invariant being enforced in
+one line in
+&lt;code&gt;shipper&#x2F;src&#x2F;linux_sensor.rs&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! events into the shipper&amp;#39;s bounded channel. blocking_send provides the&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! backpressure link: a stalled shipper stops this loop and overflow is&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;&lt;code&gt;blocking_send&lt;&#x2F;code&gt;, not &lt;code&gt;try_send&lt;&#x2F;code&gt;. The distinction is four characters wide
+and it’s the entire policy. &lt;code&gt;try_send&lt;&#x2F;code&gt; would return an error when the
+channel is full, and the natural thing to write next is a &lt;code&gt;continue&lt;&#x2F;code&gt; — at
+which point you have quietly created a second drop site, uncounted,
+invisible, in user space. &lt;code&gt;blocking_send&lt;&#x2F;code&gt; instead parks the reader thread,
+which stops draining the kernel ring, which pushes the overflow back to the
+one place designed to absorb it.&lt;&#x2F;p&gt;
+&lt;p&gt;A bounded channel with a blocking send &lt;em&gt;is&lt;&#x2F;em&gt; the backpressure. There’s no
+framework involved. The design lives in a function name.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;why-exactly-once-is-a-marketing-term&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#why-exactly-once-is-a-marketing-term&quot; aria-label=&quot;Anchor link for: why-exactly-once-is-a-marketing-term&quot;&gt;Why “exactly once” is a marketing term&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Now the events need to cross a network to a backend, and here we meet the
+most persistently misunderstood problem in distributed systems.&lt;&#x2F;p&gt;
+&lt;p&gt;You send a batch. You don’t get a response. What happened?&lt;&#x2F;p&gt;
+&lt;p&gt;Maybe the batch never arrived. Maybe it arrived, was written to the
+database, and the acknowledgement was lost on the way back. From where you
+sit those two situations are &lt;em&gt;indistinguishable&lt;&#x2F;em&gt; — the evidence available
+to you is identical — and yet they demand opposite actions. Resending is
+correct in the first case and creates a duplicate in the second.&lt;&#x2F;p&gt;
+&lt;p&gt;There is no protocol that fixes this. You cannot add a handshake, because
+the acknowledgement of the handshake can also be lost, forever, turtles all
+the way down. This is the Two Generals problem and it is not an engineering
+gap, it’s a proof.&lt;&#x2F;p&gt;
+&lt;p&gt;So “exactly once delivery” does not exist. What exists — and what every
+mature system actually does, whatever the brochure says — is &lt;strong&gt;at-least-once
+delivery plus idempotent processing&lt;&#x2F;strong&gt;. Send until acknowledged, accept
+duplicates as normal, and make the receiver’s handling of a duplicate a
+no-op. The system’s &lt;em&gt;observable behavior&lt;&#x2F;em&gt; is exactly-once. The delivery
+never was.&lt;&#x2F;p&gt;
+&lt;p&gt;The receiving half is a single line in
+&lt;code&gt;backend&#x2F;src&#x2F;lib.rs&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;                .&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;with_option&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;insert_deduplication_token&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; &amp;amp;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;&quot;&gt;token&lt;&#x2F;span&gt;&lt;span&gt;);&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;The token is &lt;code&gt;&amp;lt;agent_id&amp;gt;:&amp;lt;sequence&amp;gt;&lt;&#x2F;code&gt;. ClickHouse remembers recently-seen
+tokens and silently discards an insert that repeats one. The agent is free
+to be dumb and persistent; the backend makes repetition harmless.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;the-constraint-nobody-warns-you-about&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#the-constraint-nobody-warns-you-about&quot; aria-label=&quot;Anchor link for: the-constraint-nobody-warns-you-about&quot;&gt;The constraint nobody warns you about&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Here’s where it stops being textbook, and it’s my favorite thing in the
+whole pipeline.&lt;&#x2F;p&gt;
+&lt;p&gt;Once you’ve decided that identity is &lt;code&gt;(agent_id, sequence)&lt;&#x2F;code&gt; attached to a
+&lt;em&gt;batch&lt;&#x2F;em&gt;, you have — without necessarily noticing — signed a contract that
+constrains you forever after. From
+&lt;code&gt;shipper&#x2F;src&#x2F;queue.rs&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! Because the backend dedupes on (agent_id, sequence), recovery must resend&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! the exact batches as originally constructed — re-batching the same events&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! under an old sequence would get them silently deduped away. So the WAL&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! stores whole batches, and replay bypasses the batching logic entirely.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Read that failure mode carefully, because it’s beautifully nasty. Suppose
+after a crash you replay your unsent events and, being tidy, you repack
+them into fuller batches. Batch 100 originally held events A and B; now
+batch 100 holds A, B, C, and D. You send it. The backend sees token
+&lt;code&gt;agent:100&lt;&#x2F;code&gt;, recognizes it, and drops the insert as a duplicate.&lt;&#x2F;p&gt;
+&lt;p&gt;Events C and D are gone. Not delayed — &lt;em&gt;gone&lt;&#x2F;em&gt;, permanently, and with a
+successful acknowledgement returned to the agent. No error is logged
+anywhere. Your metrics are green. The data is missing.&lt;&#x2F;p&gt;
+&lt;p&gt;The lesson generalizes well beyond this codebase: &lt;strong&gt;when you make an
+identifier the basis of deduplication, you freeze the boundaries of whatever
+that identifier names.&lt;&#x2F;strong&gt; The batch stopped being a transient performance
+optimization the moment it became an identity. It’s now a durable structure
+you are not allowed to reorganize.&lt;&#x2F;p&gt;
+&lt;p&gt;Which is exactly why the write-ahead log stores whole encoded batches, and
+why replay is a separate code path that walks the disk rather than
+re-entering the batcher. The pipeline has a “no re-batching” rule the way a
+database has a “no rewriting history” rule, and for the same underlying
+reason.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;what-durability-actually-costs&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#what-durability-actually-costs&quot; aria-label=&quot;Anchor link for: what-durability-actually-costs&quot;&gt;What durability actually costs&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;The write-ahead log itself is the oldest trick in the book: write the data
+to disk and force it to physical media &lt;em&gt;before&lt;&#x2F;em&gt; you tell anyone you have
+it, and reclaim the space only after someone else has taken responsibility.&lt;&#x2F;p&gt;
+&lt;p&gt;The header spells the ordering out:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! Durable on-disk queue: a write-ahead log of EventBatch records so events&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! survive a shipper restart. A batch is appended and fsync&amp;#39;d *before* the&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! first send attempt and reclaimed only after the backend acks it.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;&lt;code&gt;fsync&lt;&#x2F;code&gt; before the first attempt, reclaim after the ack. Those two
+bookends define a window in which the data exists in two places at once,
+and that redundancy is the entire point. Every durable system in existence
+is some variation on this trick.&lt;&#x2F;p&gt;
+&lt;p&gt;The part that separates a real WAL from a toy one is what happens when you
+find damage on startup:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! missing cursor is safe: everything replays and the backend dedupes. A&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! torn record at the tail of the *last* segment is a normal crash artifact&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! and is truncated away; corruption anywhere else is a hard error.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;This is a small masterclass in thinking about failure, so let me unpack the
+three cases separately.&lt;&#x2F;p&gt;
+&lt;p&gt;A &lt;strong&gt;torn record at the tail of the last segment&lt;&#x2F;strong&gt; is what a crash &lt;em&gt;looks
+like&lt;&#x2F;em&gt;. You were in the middle of appending; the machine lost power; the
+final record is half-written. That isn’t corruption, it’s the expected
+physical signature of an interruption. Truncate it and move on — the events
+in it were never acknowledged to anyone, so nothing is lost that anyone
+believes exists.&lt;&#x2F;p&gt;
+&lt;p&gt;A &lt;strong&gt;damaged record in the middle&lt;&#x2F;strong&gt; is a different animal entirely. Nothing
+in normal operation writes there. Its presence means a bad disk, a filesystem
+bug, or something modifying your files. Recovering from that by skipping the
+bad record would be the worst possible choice: you’d silently drop unknown
+data and continue as if healthy. So it’s a hard error, loudly.&lt;&#x2F;p&gt;
+&lt;p&gt;A &lt;strong&gt;missing ack cursor&lt;&#x2F;strong&gt; is safe to lose because losing it can only cause
+&lt;em&gt;over&lt;&#x2F;em&gt;-delivery — you replay batches the backend already has, and the
+deduplication makes that free. The cursor is an optimization, and it’s
+designed so that its failure mode lands on the harmless side.&lt;&#x2F;p&gt;
+&lt;p&gt;That’s the design principle underneath all three: for every piece of state,
+ask which direction its corruption pushes you, and arrange for the cheap
+direction to be the one that happens. Redundant work: fine. Silent data
+loss: never.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;decoupling-and-the-luxury-of-a-slow-consumer&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#decoupling-and-the-luxury-of-a-slow-consumer&quot; aria-label=&quot;Anchor link for: decoupling-and-the-luxury-of-a-slow-consumer&quot;&gt;Decoupling, and the luxury of a slow consumer&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;The last structural idea is visible in the module header of
+&lt;code&gt;shipper&#x2F;src&#x2F;ship.rs&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! Batching gRPC publisher, decoupled into a batcher and a sender that&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! meet at the durable queue: the batcher drains the channel and appends&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! every batch to the WAL; the sender reads batches back off disk and&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! delivers them at-least-once (same sequence until acked). A dead&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! backend therefore parks only the sender — telemetry keeps flowing to&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! disk up to Config::max_queue_bytes, past which the batcher stops&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! consuming and backpressure walks channel -&amp;gt; reader thread -&amp;gt; kernel&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! ring (still the only place designed to drop).&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Two independent components that never speak to each other; they share only
+a file. The batcher’s job is to get events onto disk. The sender’s job is to
+get things off disk and onto the network. Neither knows the other exists.&lt;&#x2F;p&gt;
+&lt;p&gt;The consequence is that a backend outage — which is the common case, not
+the exotic one; deploys happen, networks partition — degrades gracefully
+along a predictable path. The sender parks. The batcher keeps writing.
+Telemetry accumulates on disk, which is cheap and enormous. Only when the
+disk cap is reached does pressure resume its walk up the chain toward the
+kernel ring.&lt;&#x2F;p&gt;
+&lt;p&gt;There’s a nice systems-thinking observation buried in there. Introducing an
+intermediate storage layer didn’t just add buffering — it &lt;strong&gt;changed the
+failure mode from correlated to independent&lt;&#x2F;strong&gt;. Without the WAL, a network
+problem immediately becomes a kernel-ring problem, because the whole chain
+is rigidly coupled and pressure transmits instantly. With it, the two
+failures are separated by hours of disk capacity. Same components, one
+extra layer, and an outage that would have cost you telemetry now costs you
+nothing but disk space.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;boring-on-purpose&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#boring-on-purpose&quot; aria-label=&quot;Anchor link for: boring-on-purpose&quot;&gt;Boring on purpose&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Look at what the finished pipeline actually is. A bounded channel. A
+blocking send. A size-and-time batcher. An append-only log with CRCs. A
+retry loop. A dedupe token.&lt;&#x2F;p&gt;
+&lt;p&gt;Not one of those is clever. There is no novel algorithm anywhere, nothing
+you couldn’t explain to a competent engineer in a minute each. And that’s
+the achievement rather than an apology for it — because this layer sits
+between kernel code that can crash a machine and a detection engine whose
+correctness depends utterly on its input being complete. It is the part of
+the system that &lt;em&gt;must&lt;&#x2F;em&gt; be reasoned about without effort, at 3am, by someone
+who didn’t write it.&lt;&#x2F;p&gt;
+&lt;p&gt;The interesting decisions were all about placement and honesty. Put the
+lossy stage where loss is unavoidable and countable. Put durability before
+the first send, not after. Keep failures independent by inserting a layer
+between them. Make every piece of state fail toward redundant work rather
+than toward silence.&lt;&#x2F;p&gt;
+&lt;p&gt;Do that, and what’s left is boring. Which means the thinking worked.&lt;&#x2F;p&gt;
+&lt;p&gt;The next problem doesn’t yield to boring, though. Once you have a complete,
+durable stream of events, you have to say &lt;em&gt;what each one happened to&lt;&#x2F;em&gt; — and
+on a running machine, the things you’re naming keep disappearing and the
+names keep getting reused. That identity problem is where the next essay
+begins.&lt;&#x2F;p&gt;
+</content>
+        
+    </entry>
+</feed>

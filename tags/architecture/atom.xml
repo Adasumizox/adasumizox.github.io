@@ -1,0 +1,1286 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en">
+    <title>Daniel&#x27;s Detection Notes - Architecture</title>
+    <subtitle>Hands-on detection engineering notes by Daniel Jeczen: building EDR and SIEM labs, exploring Windows telemetry, and turning security events into useful detections.</subtitle>
+    <link rel="self" type="application/atom+xml" href="https://adasumizox.github.io/tags/architecture/atom.xml"/>
+    <link rel="alternate" type="text/html" href="https://adasumizox.github.io"/>
+    <generator uri="https://www.getzola.org/">Zola</generator>
+    <updated>2026-09-02T00:00:00+00:00</updated>
+    <id>https://adasumizox.github.io/tags/architecture/atom.xml</id>
+    <entry xml:lang="en">
+        <title>Cutting the Network from Inside</title>
+        <published>2026-09-02T00:00:00+00:00</published>
+        <updated>2026-09-02T00:00:00+00:00</updated>
+        
+        <author>
+          <name>
+            
+              Unknown
+            
+          </name>
+        </author>
+        
+        <link rel="alternate" type="text/html" href="https://adasumizox.github.io/posts/05-cutting-the-network-from-inside/"/>
+        <id>https://adasumizox.github.io/posts/05-cutting-the-network-from-inside/</id>
+        
+        <content type="html" xml:base="https://adasumizox.github.io/posts/05-cutting-the-network-from-inside/">&lt;p&gt;&lt;em&gt;Building an EDR from scratch, essay 5 of 13.&lt;&#x2F;em&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;Network isolation is the response action that looks easiest and is hardest.&lt;&#x2F;p&gt;
+&lt;p&gt;The pitch is simple enough that a manager can specify it in one sentence: a
+machine is compromised, cut it off the network, contain the damage. Every
+commercial EDR has the button. It usually has a reassuring icon.&lt;&#x2F;p&gt;
+&lt;p&gt;And the implementation is a paradox with a very short fuse. You are going to
+tell a machine to stop talking to the network — using the network. The
+instruction to sever connectivity arrives over the connectivity it severs.
+If you do the obvious thing, the machine goes silent mid-sentence and stays
+silent forever, because the only channel you had for saying “actually, let
+it back on” was the one you just cut.&lt;&#x2F;p&gt;
+&lt;p&gt;That’s not a race condition you’ll catch in code review. It’s a machine that
+needs someone to physically walk to it. Multiply by the number of hosts an
+analyst can click through in a panic, and a containment feature becomes an
+outage.&lt;&#x2F;p&gt;
+&lt;p&gt;Everything interesting about this action follows from that one problem.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;isolation-isn-t-block-everything&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#isolation-isn-t-block-everything&quot; aria-label=&quot;Anchor link for: isolation-isn-t-block-everything&quot;&gt;Isolation isn’t “block everything”&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;The naive version — drop all traffic — is unusable, and the exemption list
+tells you a lot about how networks actually work. From
+&lt;code&gt;shipper&#x2F;src&#x2F;isolate.rs&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! Self-harm is the whole problem (see proto IsolateHostAction): a&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! ruleset that fails to exempt the agent&amp;#39;s own backend endpoint bricks&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! the host — isolated, unreachable, and un-un-isolatable. So the&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! executor refuses to apply ANYTHING unless it can parse and resolve&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! the backend endpoint, and validates every operator CIDR before the&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! kernel is touched (all-or-nothing).&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Start with the refusal, because it’s the most important line. If the agent
+cannot determine its own backend endpoint, it applies &lt;em&gt;nothing at all&lt;&#x2F;em&gt;. Not
+a best-effort ruleset, not a partial block. The action fails and reports
+failure.&lt;&#x2F;p&gt;
+&lt;p&gt;This runs against a reflex most of us have — partial progress feels
+responsible, and “we contained most of it” sounds better than “we did
+nothing.” Here it’s precisely backwards. A partially-applied isolation is a
+bricked host, which is strictly worse than an uncontained one: you’ve lost
+the machine &lt;em&gt;and&lt;&#x2F;em&gt; your visibility into it, and now the incident includes a
+site visit. When a failure mode is unrecoverable, refusing to start is the
+safe branch.&lt;&#x2F;p&gt;
+&lt;p&gt;The rest of the exemption list is a tour of the protocols people forget:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! kernel is touched (all-or-nothing). The exemption set is deliberately&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! minimal: backend endpoint, loopback, DHCP (v4 + v6, or lease expiry&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! takes the host off the network underneath the containment), and IPv6&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! neighbor discovery (ARP lives below IP, but NDP rides ICMPv6 — block&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! it and v6 connectivity dies, including to the backend).&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;&lt;strong&gt;Loopback&lt;&#x2F;strong&gt; — block it and half the software on the machine breaks, because
+local services talk to each other over &lt;code&gt;127.0.0.1&lt;&#x2F;code&gt; constantly. You’d contain
+the host by breaking it.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;DHCP&lt;&#x2F;strong&gt; is the one that gets people, and it’s a lovely example of a
+time-delayed failure. Block DHCP and everything works fine. For hours. Then
+the lease expires, the renewal is blocked, the interface loses its address,
+and the host drops off the network entirely — including the exempted backend
+path, which was exempted by IP on an interface that no longer has one. Your
+isolation silently upgrades itself to a brick, long after anyone is watching.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;IPv6 neighbor discovery&lt;&#x2F;strong&gt; is the same trap with a protocol-layering twist.
+On IPv4, address resolution is ARP, which sits &lt;em&gt;below&lt;&#x2F;em&gt; IP and isn’t touched
+by IP-layer filtering — you can block everything and ARP still works. IPv6
+folded that function into NDP, which rides on ICMPv6, which &lt;em&gt;is&lt;&#x2F;em&gt; IP traffic.
+Apply the IPv4 mental model to an IPv6 host and you block neighbor discovery,
+and v6 connectivity dies — including to your backend, if it’s reached over
+v6. Two protocols doing the same job at different layers, and the difference
+is only visible if you know the history.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;what-you-refuse-to-exempt&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#what-you-refuse-to-exempt&quot; aria-label=&quot;Anchor link for: what-you-refuse-to-exempt&quot;&gt;What you refuse to exempt&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;The omissions are more interesting than the inclusions, because each one is
+a deliberate acceptance of pain:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! it and v6 connectivity dies, including to the backend). Deliberately&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! NOT exempted: established flows (an active C2 session must die) and&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! DNS (re-resolution would open a tunnel; backend IPs are pinned at&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! apply time — a backend failover during isolation needs an operator&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! allow_cidrs entry planned ahead).&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;&lt;strong&gt;Established flows must die.&lt;&#x2F;strong&gt; Almost every firewall ruleset on earth
+begins with “allow established and related” — it’s the first line of every
+tutorial, because without it stateful protocols break. But an active C2
+session &lt;em&gt;is&lt;&#x2F;em&gt; an established connection. Exempt established flows and you have
+built a containment that specifically permits the thing you’re containing.
+The attacker’s live shell survives; only their ability to open &lt;em&gt;new&lt;&#x2F;em&gt;
+connections is blocked. This is, I’d bet, a real bug in real products.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;DNS must die&lt;&#x2F;strong&gt;, which hurts more than it sounds. Blocking name resolution
+breaks a lot of software in confusing ways. But DNS is a general-purpose
+bidirectional channel that every network permits by default — DNS tunneling
+is a mature, tooled technique, not a curiosity. Leaving a hole for it
+because “it’s just name resolution” defeats the exercise.&lt;&#x2F;p&gt;
+&lt;p&gt;The cost is stated plainly rather than hidden: backend IPs are pinned as
+addresses at the moment of application, so if the backend fails over to a
+different address while a host is isolated, that host can’t follow, and
+recovering it needs a CIDR that an operator planned in advance. That’s a
+genuine operational constraint. Writing it down in the module header, next to
+the decision that causes it, is what separates an accepted trade-off from a
+future incident report.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;half-applied-is-worse-than-not-applied&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#half-applied-is-worse-than-not-applied&quot; aria-label=&quot;Anchor link for: half-applied-is-worse-than-not-applied&quot;&gt;Half-applied is worse than not applied&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Since a partially-applied ruleset is the disaster case, atomicity isn’t a
+nice-to-have. There must never be an instant where the block-everything rule
+exists and the exemption doesn’t.&lt;&#x2F;p&gt;
+&lt;p&gt;What I find genuinely satisfying is that all three platforms provide a way to
+do this, and all three arrived at it independently.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;Linux&lt;&#x2F;strong&gt; uses an &lt;code&gt;nft -f&lt;&#x2F;code&gt; file load, which applies as a single transaction.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;macOS&lt;&#x2F;strong&gt; uses PF anchors, and the sequencing is spelled out step by step:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; sequenced so the policy only ever becomes visible complete:&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; (1) `pfctl -E` enables PF with a reference token — rules without&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; enforcement would be silent theater, PF ships disabled on macOS;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; (2) the whole ruleset lands in the anchor via one&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; `pfctl -a edr_isolate -f -` load (an anchor load is a single commit,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; the `nft -f` analog); (3) the main ruleset gets the anchor&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; attachment only if missing — attaching AFTER the load means the&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; first evaluation already sees the full policy;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Step 3 is the one to admire. The anchor is &lt;em&gt;populated first&lt;&#x2F;em&gt;, then attached
+to the main ruleset. Attach first and there’s a window — however brief —
+where an empty or half-loaded anchor is live. Ordering the operations so the
+dangerous window never opens is cheaper and more reliable than trying to make
+the window small.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;Windows&lt;&#x2F;strong&gt; uses the Windows Filtering Platform:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; mutations run inside one FwpmTransaction — commit or nothing, the&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; `nft -f` atomicity.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Three operating systems, three unrelated APIs, one requirement. When a
+constraint shows up identically across independent designs, it’s usually
+telling you something true about the problem rather than about the tools.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;rules-don-t-apply-to-conversations-already-happening&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#rules-don-t-apply-to-conversations-already-happening&quot; aria-label=&quot;Anchor link for: rules-don-t-apply-to-conversations-already-happening&quot;&gt;Rules don’t apply to conversations already happening&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Here’s the concept I’d most want a reader to take away, because it
+generalizes far beyond firewalls and it’s counterintuitive until it isn’t.&lt;&#x2F;p&gt;
+&lt;p&gt;A stateful firewall doesn’t evaluate rules for every packet. That would be
+expensive. Instead, the first packet of a flow is evaluated against the rules,
+and the verdict is cached in a &lt;strong&gt;state table&lt;&#x2F;strong&gt;. Subsequent packets of that
+flow match the state and skip rule evaluation entirely.&lt;&#x2F;p&gt;
+&lt;p&gt;Which means: &lt;strong&gt;changing the rules does not affect conversations already in
+progress.&lt;&#x2F;strong&gt; You install a perfect block-everything ruleset, and the attacker’s
+existing session sails straight through it, because that session’s packets
+never reach the rules at all.&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; first evaluation already sees the full policy; (4) `-F states`&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; flushes the state table, because PF consults states BEFORE rules —&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; a pre-isolation flow&amp;#39;s state would ferry C2 packets straight past&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; the block.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;You have to flush the state table. The ruleset is only half the enforcement;
+the cached verdicts are the other half, and they’re older than your policy.&lt;&#x2F;p&gt;
+&lt;p&gt;Windows has the same problem and solves it as a side effect, which is a
+pleasant piece of luck:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; table and macOS anchor exactly. Adding&#x2F;deleting ALE filters makes&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; BFE reauthorize established connections, so live C2 dies at apply&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; with no extra work.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;WFP’s ALE (Application Layer Enforcement) layers reauthorize existing
+connections when filters change. The state invalidation is automatic.&lt;&#x2F;p&gt;
+&lt;p&gt;The general shape — &lt;em&gt;a policy change must invalidate the caches that were
+built under the old policy&lt;&#x2F;em&gt; — is everywhere once you look. Session tokens
+issued before a permission was revoked. Connection pools holding
+credentials rotated an hour ago. CDN caches serving content you’ve since
+made private. In every case the new rule is correct and completely bypassed,
+because something old is short-circuiting the check. Ask, always: what
+already decided this, before I changed the rules?&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;living-in-someone-else-s-house&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#living-in-someone-else-s-house&quot; aria-label=&quot;Anchor link for: living-in-someone-else-s-house&quot;&gt;Living in someone else’s house&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;An enterprise machine’s firewall is not yours. It has corporate policy,
+maybe a VPN client, maybe &lt;code&gt;firewalld&lt;&#x2F;code&gt;, maybe Docker rewriting rules whenever
+a container starts. You are a guest.&lt;&#x2F;p&gt;
+&lt;p&gt;The pattern that makes this survivable is an owned namespace:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; The agent-owned nftables table (Linux). Created, flushed, and deleted&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; by name only — other tables (firewalld, docker) are never touched.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;pub const&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; TABLE_NAME&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;: &amp;amp;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FE4450;&quot;&gt;str&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt; =&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;quot;edr_isolate&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; The agent-owned PF anchor (macOS) — the same owned-namespace idea as&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; the Linux table: loaded, listed, and flushed by name only. The main&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; ruleset is touched exactly once, to attach the anchor reference&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; (see render_pf_main_ruleset), never to edit other rules.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Windows gets the same treatment with a fixed provider and sublayer GUID. In
+all three cases the rule is: everything the agent creates lives under one
+name it owns, it only ever manipulates things under that name, and cleanup is
+“delete my container” rather than “remove the rules I think I added.”&lt;&#x2F;p&gt;
+&lt;p&gt;“Touched exactly once” is the discipline that makes it work. There’s one
+unavoidable interaction with shared state — the anchor has to be &lt;em&gt;referenced&lt;&#x2F;em&gt;
+from the main ruleset or it’s never consulted — and that single touch is
+called out explicitly, so the exception stays an exception.&lt;&#x2F;p&gt;
+&lt;p&gt;This is just namespacing, the same instinct that gives you Java packages and
+Kubernetes namespaces. It’s worth naming as a general technique for
+modifying systems you don’t own: &lt;strong&gt;claim a namespace, confine yourself to
+it, and make removal a single operation.&lt;&#x2F;strong&gt;&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;deciding-what-a-reboot-means&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#deciding-what-a-reboot-means&quot; aria-label=&quot;Anchor link for: deciding-what-a-reboot-means&quot;&gt;Deciding what a reboot means&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;One more decision, easy to skip past, that is actually a policy question
+disguised as an API flag:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; `nft -f` atomicity. The engine session is the default non-dynamic&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; one and no filter carries FWPM_FILTER_FLAG_PERSISTENT: containment&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; outlives the agent process but not a reboot, matching the Linux&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; table and macOS anchor exactly.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Should isolation survive a reboot?&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;Yes&lt;&#x2F;strong&gt; is defensible: the machine was compromised, containment should be
+durable, and an attacker who can reboot shouldn’t be able to escape it.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;No&lt;&#x2F;strong&gt; is what’s implemented, and the reasoning is about recoverability.
+Isolation that persists across reboots means a mistake — a bad rule, a
+resolution failure, a mis-clicked host — needs manual intervention on the
+console. Isolation that dies at reboot means the worst case has a recovery
+path any user can perform, and the agent can simply re-apply it on startup if
+the host is genuinely still contained.&lt;&#x2F;p&gt;
+&lt;p&gt;I don’t think there’s a universal right answer; it depends on whether you
+fear attackers with reboot access more than you fear your own mistakes at 2am.
+What matters is that the question got asked and answered &lt;em&gt;the same way on all
+three platforms&lt;&#x2F;em&gt;. WFP filters can be persistent. The agent deliberately
+doesn’t make them so, specifically to match the Linux and macOS behavior.&lt;&#x2F;p&gt;
+&lt;p&gt;That’s the discipline that keeps cross-platform systems sane. Every platform
+offers slightly different capabilities, and the temptation is to use whatever
+each one provides. Do that and you get three subtly different products
+wearing one name, and an operator who learned the behavior on Linux is
+surprised by Windows during an incident. Choosing the &lt;em&gt;same&lt;&#x2F;em&gt; semantics
+everywhere — even when it means declining a feature — is what makes fleet
+behavior predictable.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;testing-the-thing-you-can-t-test&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#testing-the-thing-you-can-t-test&quot; aria-label=&quot;Anchor link for: testing-the-thing-you-can-t-test&quot;&gt;Testing the thing you can’t test&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Last piece, and it’s the one that made this action tractable at all:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! Policy is separated from mechanism so the dangerous decision logic is&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! exhaustively unit-tested without ever touching a firewall:&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;!   * `IsolateControl` — the OS primitive (atomically replace &#x2F; remove&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;!     the containment ruleset), one thin impl per platform.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;!   * `IsolateExecutor` — the pure guard&#x2F;rendering logic over any&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;!     `IsolateControl`, driven by a mock in tests.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;The dangerous part of this feature isn’t the firewall call. It’s the
+&lt;em&gt;decisions&lt;&#x2F;em&gt;: which exemptions to include, whether the backend resolved, what
+to do about a malformed CIDR, what the ruleset text should say. All of that
+is pure computation — inputs to strings — and pure computation can be tested
+exhaustively, on any machine, in milliseconds, with no root and no risk.&lt;&#x2F;p&gt;
+&lt;p&gt;So the rendering functions produce ruleset text that gets compared against
+golden files, and the guard logic runs against a mock. The part that actually
+touches the kernel shrinks to a thin layer whose only job is to hand a
+prepared string to &lt;code&gt;nft&lt;&#x2F;code&gt;, &lt;code&gt;pfctl&lt;&#x2F;code&gt;, or BFE.&lt;&#x2F;p&gt;
+&lt;p&gt;Which means most of this feature’s correctness was established on a Linux
+laptop, including the Windows and macOS behavior. Not all of it — you still
+need real drills to learn things like PF’s state-table ordering — but the
+decision logic, which is where the bricking bugs live, is verified without a
+firewall in sight.&lt;&#x2F;p&gt;
+&lt;p&gt;That inversion, and how far you can push it when your target is a kernel you
+cannot attach a debugger to, returns later in the series.&lt;&#x2F;p&gt;
+&lt;p&gt;But first, the uncomfortable inverse of everything this series has covered so
+far: not what the sensors see, but what they structurally cannot. That is
+the subject of the next essay.&lt;&#x2F;p&gt;
+</content>
+        
+    </entry>
+    <entry xml:lang="en">
+        <title>The Authority Problem</title>
+        <published>2026-08-26T00:00:00+00:00</published>
+        <updated>2026-08-26T00:00:00+00:00</updated>
+        
+        <author>
+          <name>
+            
+              Unknown
+            
+          </name>
+        </author>
+        
+        <link rel="alternate" type="text/html" href="https://adasumizox.github.io/posts/04-the-authority-problem/"/>
+        <id>https://adasumizox.github.io/posts/04-the-authority-problem/</id>
+        
+        <content type="html" xml:base="https://adasumizox.github.io/posts/04-the-authority-problem/">&lt;p&gt;&lt;em&gt;Building an EDR from scratch, essay 4 of 13.&lt;&#x2F;em&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;Up to this point, everything in this series has been read-only. Sensors
+observe, the pipeline delivers, the backend stores. If the whole system were
+compromised tomorrow, the damage would be a serious data breach: an attacker
+learns what runs on your machines.&lt;&#x2F;p&gt;
+&lt;p&gt;Now we add the letter R. Response. Kill this process, quarantine that file,
+cut this host off the network.&lt;&#x2F;p&gt;
+&lt;p&gt;And the moment you do that, you have built something categorically
+different. You have deployed, to every endpoint in the organization, a
+privileged agent that accepts instructions from the network and carries them
+out. That is a description of a botnet. The only thing separating your
+security tool from the worst-case incident in your company’s history is the
+answer to one question: &lt;strong&gt;how does an endpoint know that an instruction is
+legitimate?&lt;&#x2F;strong&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;Get that answer wrong and your EDR becomes the most efficient lateral
+movement infrastructure an attacker could ask for — pre-installed
+everywhere, running as root, already trusted, already exempt from your own
+monitoring.&lt;&#x2F;p&gt;
+&lt;p&gt;This essay is about the answer.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;two-questions-that-look-like-one&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#two-questions-that-look-like-one&quot; aria-label=&quot;Anchor link for: two-questions-that-look-like-one&quot;&gt;Two questions that look like one&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;The most common way to get this wrong is a confusion so natural that people
+make it without noticing.&lt;&#x2F;p&gt;
+&lt;p&gt;The agent connects to the backend over mutual TLS. Both sides present
+certificates, both verify, the channel is encrypted and authenticated.
+Excellent. Now a command arrives over that channel. Should the agent execute
+it?&lt;&#x2F;p&gt;
+&lt;p&gt;The tempting reasoning: the channel is authenticated, so the message came
+from the backend, so the message is legitimate. Each step is true. The
+conclusion does not follow — because “this message came from the backend” and
+“a human being with authority decided this should happen” are &lt;em&gt;different
+propositions&lt;&#x2F;em&gt;, and TLS only establishes the first.&lt;&#x2F;p&gt;
+&lt;p&gt;Say it more carefully:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Transport security&lt;&#x2F;strong&gt; answers: &lt;em&gt;who am I talking to right now?&lt;&#x2F;em&gt;&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;strong&gt;Authorization&lt;&#x2F;strong&gt; answers: &lt;em&gt;who decided this should happen, and were they
+allowed to?&lt;&#x2F;em&gt;&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;A compromised backend passes the first test perfectly. It holds the
+legitimate server key. Every TLS check succeeds. If the agent’s only gate is
+“did this arrive over the authenticated channel,” then whoever owns the
+backend owns every endpoint, instantly and totally.&lt;&#x2F;p&gt;
+&lt;p&gt;And backends get compromised. They’re internet-adjacent, they run a stack of
+dependencies, they’re administered by humans. Designing as though the
+central server can never be breached is not a security posture, it’s a hope.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;designing-for-your-own-compromise&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#designing-for-your-own-compromise&quot; aria-label=&quot;Anchor link for: designing-for-your-own-compromise&quot;&gt;Designing for your own compromise&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;So the real design exercise is to assume the backend &lt;em&gt;is&lt;&#x2F;em&gt; compromised and
+ask what an attacker can then do.&lt;&#x2F;p&gt;
+&lt;p&gt;The answer this system gives is stated in the first paragraph of
+&lt;code&gt;backend&#x2F;src&#x2F;tasking.rs&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! The backend is a RELAY, never an authority (see proto AgentTasking): it&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! decodes each SignedTask payload ONLY to read agent_id (routing) and&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! task_id (dedupe&#x2F;ack) — it never inspects the signature, so it holds no&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! signing key and cannot mint a task an agent will run. All verification&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! is the agent&amp;#39;s (crate::task on the shipper side).&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Tasks are signed by an operator with an Ed25519 key. The backend never has
+that key. It cannot create a valid task, cannot modify one without breaking
+the signature, and — this is the elegant part — &lt;em&gt;cannot even verify one&lt;&#x2F;em&gt;,
+because it has no reason to.&lt;&#x2F;p&gt;
+&lt;p&gt;Note the deliberate refusal in “it never inspects the signature.” A backend
+that verified signatures would be no less secure, but it would blur the
+architecture: someone would eventually add a “trusted internal task” path
+for convenience, and the property would quietly die. Making the backend
+structurally incapable of the check keeps the boundary honest.&lt;&#x2F;p&gt;
+&lt;p&gt;So what &lt;em&gt;can&lt;&#x2F;em&gt; a compromised backend do? Exactly three things: withhold
+tasks, delay tasks, and replay tasks it has already seen. That is a real
+attack surface — a backend that silently drops every quarantine command is a
+serious problem — but it is a &lt;strong&gt;denial&lt;&#x2F;strong&gt; surface, not an &lt;strong&gt;execution&lt;&#x2F;strong&gt;
+surface. The attacker can prevent responses. They cannot cause them.&lt;&#x2F;p&gt;
+&lt;p&gt;That distinction is the entire point of the design, and it generalizes: when
+you’re deciding where to put a security check, ask what each component can do
+if it’s fully owned. Components that &lt;em&gt;can’t&lt;&#x2F;em&gt; do damage need less protection
+than components that can. Here, the backend was demoted from a trusted
+authority to an untrusted courier, and the amount of trust the system needs
+to place in its most exposed component dropped to nearly zero.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;claims-versus-proof&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#claims-versus-proof&quot; aria-label=&quot;Anchor link for: claims-versus-proof&quot;&gt;Claims versus proof&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;The second structural idea concerns identity, and it has the same flavor:
+never accept an assertion when you can require a proof.&lt;&#x2F;p&gt;
+&lt;p&gt;Every message on the wire contains an &lt;code&gt;agent_id&lt;&#x2F;code&gt; field. An agent connecting
+to the task stream says “I am &lt;code&gt;web-07&lt;&#x2F;code&gt;, give me my tasks.” The obvious
+implementation reads the field and routes accordingly, and it is trivially
+exploitable — any enrolled agent can claim to be any other agent and receive
+its commands.&lt;&#x2F;p&gt;
+&lt;p&gt;The fix is to treat the field as a &lt;em&gt;claim&lt;&#x2F;em&gt; that must match a &lt;em&gt;proof&lt;&#x2F;em&gt;, and
+the proof is the client certificate. From
+&lt;code&gt;backend&#x2F;src&#x2F;authn.rs&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;!   edr-agent:&#x2F;&#x2F;&amp;lt;agent_id&amp;gt;    an agent; may publish telemetry and open a&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;!                             task stream only as &amp;lt;agent_id&amp;gt;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;!   edr-operator:&#x2F;&#x2F;&amp;lt;name&amp;gt;     an operator; may submit tasks (&amp;lt;name&amp;gt; is&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;!                             for audit logging)&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;The certificate carries a URI in its Subject Alternative Name, and the URI
+scheme &lt;em&gt;is&lt;&#x2F;em&gt; the role. An &lt;code&gt;edr-agent:&#x2F;&#x2F;&lt;&#x2F;code&gt; certificate may open a task stream —
+but only for the exact &lt;code&gt;agent_id&lt;&#x2F;code&gt; written into its own SAN. An
+&lt;code&gt;edr-operator:&#x2F;&#x2F;&lt;&#x2F;code&gt; certificate may submit tasks and nothing else. An enrolled
+agent, even a fully compromised one, cannot submit tasks to other agents,
+because it doesn’t hold a certificate with the operator scheme.&lt;&#x2F;p&gt;
+&lt;p&gt;Two details in that module are worth dwelling on because they’re the kind of
+choice that separates a design from an implementation.&lt;&#x2F;p&gt;
+&lt;p&gt;The first is &lt;em&gt;why the SAN rather than the Common Name&lt;&#x2F;em&gt;, which is where most
+people’s instinct goes:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! Identity is a URI Subject Alternative Name, never the Subject CN: a DN&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! may carry several CNs in several string encodings (RFC 6125 deprecates&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! CN for name binding), while a scheme-scoped URI SAN is unambiguous and&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! cannot collide with the DNS SANs of a server or web-PKI cert.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;A Distinguished Name can contain multiple CN components, in several string
+encodings, and different libraries will hand you different ones. An
+identifier that different parsers read differently is not an identifier —
+it’s a vulnerability with a waiting period. The web PKI learned this
+expensively enough that RFC 6125 deprecated the practice. A scheme-scoped
+URI has exactly one reading.&lt;&#x2F;p&gt;
+&lt;p&gt;The second is what happens when a certificate is &lt;em&gt;ambiguous&lt;&#x2F;em&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! The leaf must carry EXACTLY one EDR-scheme SAN: zero means the cert&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! was not enrolled as an EDR identity, two or more is a misissued cert&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! that could act as either — both are refused rather than guessed at.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;A certificate holding both an agent SAN and an operator SAN is refused
+outright. Not “prefer the more specific one,” not “take the first” — refused.
+Because a cert like that can only exist through an enrollment bug or an
+attack, and in either case the correct response to “I cannot tell what this
+is” is to stop. Every “pick a sensible default when the input is ambiguous”
+in a security path is a place where an attacker gets to choose which
+interpretation you take.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;burning-a-key-not-banning-a-name&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#burning-a-key-not-banning-a-name&quot; aria-label=&quot;Anchor link for: burning-a-key-not-banning-a-name&quot;&gt;Burning a key, not banning a name&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Certificates get stolen. So there has to be a way to say “that credential is
+no longer valid,” and the choice of &lt;em&gt;what&lt;&#x2F;em&gt; you revoke turns out to encode a
+philosophy.&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! The list is keyed on the certificate SERIAL (the standard CRL key),&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! not the identity: &amp;quot;this key is burned&amp;quot;, so recovery is revoke the old&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! serial and mint a fresh cert for the same agent_id.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Revoking the &lt;em&gt;serial&lt;&#x2F;em&gt; says “this particular key is compromised.” Revoking
+the &lt;em&gt;identity&lt;&#x2F;em&gt; would say “this host is banned.” They diverge exactly when it
+matters: a laptop is stolen, you revoke, IT reimages the machine and
+reissues it. Under serial-keyed revocation, the new certificate for the same
+&lt;code&gt;agent_id&lt;&#x2F;code&gt; just works, because it’s a different key. Under identity-keyed
+revocation, you’ve permanently poisoned a hostname and now you’re renaming
+machines to work around your own security tool.&lt;&#x2F;p&gt;
+&lt;p&gt;The general form: &lt;strong&gt;revoke the credential, not the principal.&lt;&#x2F;strong&gt; Compromise
+is a property of a secret, not of the person or machine that held it.&lt;&#x2F;p&gt;
+&lt;p&gt;There’s also a nicely pragmatic touch — serials are compared in canonical
+form, lowercase hex with leading zeros stripped, “so &lt;code&gt;openssl x509 -serial -noout&lt;&#x2F;code&gt; output pastes straight into the file.” Revocation is an emergency
+procedure performed by a stressed human at an unpleasant hour. A format
+mismatch that silently fails to revoke is a security control defeated by
+usability. Meeting the operator where they already are is a security
+property.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;a-valid-signature-is-not-a-fresh-authorization&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#a-valid-signature-is-not-a-fresh-authorization&quot; aria-label=&quot;Anchor link for: a-valid-signature-is-not-a-fresh-authorization&quot;&gt;A valid signature is not a fresh authorization&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Now the deepest problem in the essay, and the one I found genuinely
+surprising.&lt;&#x2F;p&gt;
+&lt;p&gt;Signatures don’t expire. A message signed today verifies identically in five
+years — that’s what makes them useful. But it means an attacker who captures
+a signed message holds something permanently valid. Replay is therefore not
+an edge case; it’s the natural consequence of how signatures work.&lt;&#x2F;p&gt;
+&lt;p&gt;Worse, in this system, replay is also &lt;em&gt;completely normal traffic&lt;&#x2F;em&gt;. Delivery
+is at-least-once, so honest duplicates arrive routinely. The agent cannot
+treat repetition as an attack, because repetition is the protocol working
+correctly.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;code&gt;shipper&#x2F;src&#x2F;task.rs&lt;&#x2F;code&gt; answers with a sequence of
+checks, each catching what the previous one can’t:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! Every SignedTask must pass, in order: Ed25519 signature over the raw&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! payload bytes against the pinned operator key (the backend only&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! relays — it can drop or delay tasks, never mint them), payload decode,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! agent binding (a task signed for another host is a cross-host replay),&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! freshness of issued_at (temporal replay; the window is symmetric&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! because agent clocks skew both ways), and task_id dedupe (at-least-once&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! delivery makes benign re-sends normal; the same set stops malicious&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! same-window replays).&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Signature: was this authored by the key holder. Agent binding: was it
+authored &lt;em&gt;for this host&lt;&#x2F;em&gt; — otherwise a task captured from one machine
+replays against another. Freshness: was it authored recently, bounding how
+long a captured task stays dangerous. Dedupe: have I already done this one.&lt;&#x2F;p&gt;
+&lt;p&gt;Four checks, four distinct attacks, none redundant. And the freshness window
+is symmetric because agent clocks drift in both directions — a detail that
+sounds pedantic until a host with a fast clock rejects every legitimate task
+it receives.&lt;&#x2F;p&gt;
+&lt;p&gt;Then comes the case that breaks the whole scheme, and it took me a while to
+even see it. From &lt;code&gt;shipper&#x2F;src&#x2F;config.rs&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! The policy lives INSIDE the signed payload, so the backend can withhold&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! or delay policy but never mint it. The central hazard is stale-policy&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! replay: a captured OLDER policy under a fresh task_id&#x2F;issued_at is&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! still validly signed, so the task-level replay defenses (dedupe,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! freshness) do not cover it.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Read that twice. Configuration policy is signed. An attacker captures a
+policy document from six months ago — one that, say, monitored fewer
+registry keys, or set a heartbeat interval so long the agent looks alive
+while blind. They can’t modify it; the signature would break. But they don’t
+need to. They wrap that genuinely-signed old policy in a &lt;em&gt;fresh envelope&lt;&#x2F;em&gt;
+with a new task ID and a current timestamp.&lt;&#x2F;p&gt;
+&lt;p&gt;Every defense passes. The signature is real. The agent binding is right. The
+timestamp is current. The task ID has never been seen. The agent applies a
+six-month-old policy, and the attacker has rolled back its configuration
+using nothing but valid, correctly-signed messages.&lt;&#x2F;p&gt;
+&lt;p&gt;The envelope was fresh. The &lt;em&gt;content&lt;&#x2F;em&gt; was ancient. Freshness of transmission
+tells you nothing about currency of intent.&lt;&#x2F;p&gt;
+&lt;p&gt;The fix has to live in the content’s own semantics:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! freshness) do not cover it. `AgentPolicy.version` monotonicity is the&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! identity guard: only version &amp;gt; current applies; version == current with&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! identical content is success (goal state met — idempotence under&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! at-least-once, surviving even a restart that emptied the result cache);&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! equal version with different content, or any lower version, refuses.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;The policy carries a version, and the agent only ever moves forward. An old
+policy is refused on the strength of its own contents, no matter how fresh
+its wrapper.&lt;&#x2F;p&gt;
+&lt;p&gt;The general lesson is one I now apply everywhere: &lt;strong&gt;a signature proves
+authorship, not currency.&lt;&#x2F;strong&gt; If a document’s &lt;em&gt;age&lt;&#x2F;em&gt; matters to its safety, the
+document itself must say how old it is, in terms the recipient can order.
+You cannot bolt freshness onto the transport and expect it to protect the
+payload.&lt;&#x2F;p&gt;
+&lt;p&gt;Notice too the treatment of the equal-version case. Same version, identical
+content: success. Because under at-least-once delivery the agent will
+genuinely receive the same policy twice, and the honest question isn’t “did I
+process this message” but “is the world in the state this message asks for.”
+Idempotence expressed as goal-state rather than as message-history — which
+means it survives a restart that wiped every cache.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;trusting-your-own-disk-carefully&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#trusting-your-own-disk-carefully&quot; aria-label=&quot;Anchor link for: trusting-your-own-disk-carefully&quot;&gt;Trusting your own disk, carefully&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;One last move, because it inverts a rule the rest of the system follows
+strictly.&lt;&#x2F;p&gt;
+&lt;p&gt;Policy has to survive restarts, so it’s written to disk. Disk is not a trust
+boundary — an attacker on the host can edit files. What should the agent do
+at startup if the stored policy fails verification?&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! validity. Disk is untrusted storage: tamper means the load refuses and&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! the agent runs baked defaults at version 0 — never a startup failure,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! because bricking the sensor over a corrupt config file trades&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! availability for nothing (an attacker with store write access already&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! owns the host).&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Everywhere else in this system, bad security configuration means &lt;em&gt;fail to
+start&lt;&#x2F;em&gt;. Here it means fall back to defaults and keep running. The reasoning
+is a threat-model argument rather than a taste argument: the attacker who
+can corrupt that file already has host write access. Refusing to start
+doesn’t deny them anything — it just kills your telemetry, which is a gift.
+Running on safe defaults keeps the sensor reporting, from a host you now have
+reason to look at closely.&lt;&#x2F;p&gt;
+&lt;p&gt;The same header notes that load deliberately skips the freshness check,
+“because freshness gates admission over the NETWORK; a policy this agent
+itself admitted and persisted is durable state, not a new admission.” Which
+is exactly the transport-versus-content distinction again, seen from the
+other side: freshness was always a property of &lt;em&gt;accepting a message&lt;&#x2F;em&gt;, never
+of &lt;em&gt;holding a fact&lt;&#x2F;em&gt;.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;what-authority-actually-requires&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#what-authority-actually-requires&quot; aria-label=&quot;Anchor link for: what-authority-actually-requires&quot;&gt;What authority actually requires&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Strip it down and the same principle produces every decision here.&lt;&#x2F;p&gt;
+&lt;p&gt;Authority must be &lt;strong&gt;provable at the point of action&lt;&#x2F;strong&gt;. Not asserted at the
+point of transmission, not implied by the channel, not inherited from a
+component’s position in the architecture. The agent — the thing that will
+actually terminate the process — has to be able to verify, from the message
+in front of it and a key it already holds, that someone with the right to
+order this ordered it, for this host, recently, and that it hasn’t already
+been done.&lt;&#x2F;p&gt;
+&lt;p&gt;Everything else follows. The backend is a relay because a courier needs no
+authority. Identity comes from certificates because claims need proofs.
+Revocation targets serials because compromise is a property of secrets.
+Policy carries a version because signatures don’t age.&lt;&#x2F;p&gt;
+&lt;p&gt;And the payoff is that you can say something concrete about the worst case.
+If the backend falls, the attacker gets to see telemetry and to withhold
+responses. They do not get to run commands on ten thousand machines. For a
+system with this much power distributed this widely, being able to state that
+bound — and point at the code that enforces it — is the difference between a
+security tool and a liability.&lt;&#x2F;p&gt;
+&lt;p&gt;Next comes the action with the largest blast radius of all: cutting a
+machine off the network, over the network, without cutting the connection
+you would need to undo it.&lt;&#x2F;p&gt;
+</content>
+        
+    </entry>
+    <entry xml:lang="en">
+        <title>Naming Things That Move</title>
+        <published>2026-08-19T00:00:00+00:00</published>
+        <updated>2026-08-19T00:00:00+00:00</updated>
+        
+        <author>
+          <name>
+            
+              Unknown
+            
+          </name>
+        </author>
+        
+        <link rel="alternate" type="text/html" href="https://adasumizox.github.io/posts/03-naming-things-that-move/"/>
+        <id>https://adasumizox.github.io/posts/03-naming-things-that-move/</id>
+        
+        <content type="html" xml:base="https://adasumizox.github.io/posts/03-naming-things-that-move/">&lt;p&gt;&lt;em&gt;Building an EDR from scratch, essay 3 of 13.&lt;&#x2F;em&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;An analyst looks at an alert and clicks &lt;em&gt;kill this process&lt;&#x2F;em&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;Between that click and the signal, a few hundred milliseconds pass. In
+those milliseconds the process exits on its own — it was a short-lived
+script, it was always going to exit — and the kernel, being a good steward
+of a small resource, hands its process ID to the next thing that asks. On a
+busy machine that might be a database backend, a session manager, or the
+SSH daemon holding the connection your incident responder is sitting in.&lt;&#x2F;p&gt;
+&lt;p&gt;The signal arrives. It is delivered, correctly and successfully, to
+something that has nothing to do with the alert.&lt;&#x2F;p&gt;
+&lt;p&gt;This is not an exotic race. It’s the ordinary consequence of a fact so
+familiar that it hides in plain sight: &lt;strong&gt;a PID is not an identity. It’s a
+name, drawn from a small pool, that gets recycled.&lt;&#x2F;strong&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;Endpoint telemetry is full of this. Almost everything you want to talk
+about is short-lived, and almost every name you have for those things is
+either recycled, mutable, or both. Getting this wrong doesn’t produce a
+crash — it produces a system that is confidently, quietly, wrong about
+which thing it’s discussing. This essay is about the general shape of the
+problem and the handful of moves that solve it.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;what-makes-a-name-an-identity&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#what-makes-a-name-an-identity&quot; aria-label=&quot;Anchor link for: what-makes-a-name-an-identity&quot;&gt;What makes a name an identity&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Three properties separate a usable identity from a mere label:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Unique&lt;&#x2F;strong&gt; at any instant. Two live things never share it.&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;strong&gt;Stable&lt;&#x2F;strong&gt; for the lifetime of what it names. It doesn’t change underneath
+you.&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;strong&gt;Non-recycled&lt;&#x2F;strong&gt; across lifetimes. Once a thing is gone, its identity is
+never issued to a different thing.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;PIDs have the first two and spectacularly fail the third. Filesystem paths
+fail the second &lt;em&gt;and&lt;&#x2F;em&gt; the third — a path is a lookup, resolved fresh every
+time you use it, and someone else can change what it resolves to between
+your two uses. Names that fail the third property are the dangerous ones,
+because failure looks like success: you get an answer, it’s just about a
+different object than you meant.&lt;&#x2F;p&gt;
+&lt;p&gt;The recurring fix, in every case below, is the same: &lt;strong&gt;pair the unrecycled
+name with something that pins down &lt;em&gt;which&lt;&#x2F;em&gt; lifetime you meant.&lt;&#x2F;strong&gt;&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;the-pair-that-doesn-t-recycle&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#the-pair-that-doesn-t-recycle&quot; aria-label=&quot;Anchor link for: the-pair-that-doesn-t-recycle&quot;&gt;The pair that doesn’t recycle&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;For processes, the second half of the pair is the start time. PIDs cycle;
+the &lt;em&gt;combination&lt;&#x2F;em&gt; of a PID and the moment that PID began doesn’t, because
+time doesn’t run backwards.&lt;&#x2F;p&gt;
+&lt;p&gt;The kill action in &lt;code&gt;shipper&#x2F;src&#x2F;kill.rs&lt;&#x2F;code&gt; builds its
+entire safety story on this:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! PID reuse is the whole problem (see proto KillProcessAction): the task&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! carries the intended victim&amp;#39;s start time, and a kill proceeds only if the&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! LIVE process at that pid has a matching start time (within tolerance).&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! A recycled pid always starts later than the one the operator saw, so it&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! never matches — the guard refuses instead of killing an innocent process.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;The operator’s task doesn’t say “kill PID 4823.” It says “kill PID 4823,
+which started at 14:22:07.431.” Before signalling, the agent reads the start
+time of whatever is &lt;em&gt;currently&lt;&#x2F;em&gt; living at 4823 and compares. Mismatch means
+the thing you meant is already gone, and the correct action is to refuse.&lt;&#x2F;p&gt;
+&lt;p&gt;Note the asymmetry that makes this airtight: a recycled PID always starts
+&lt;em&gt;later&lt;&#x2F;em&gt; than the one the operator observed. The comparison can never be
+fooled by a reused PID, because reuse only ever moves the timestamp forward,
+past any plausible measurement error.&lt;&#x2F;p&gt;
+&lt;p&gt;Which is what licenses something that would otherwise look sloppy:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; How far a live process&amp;#39;s start time may differ from the requested one and&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; still count as the same process. Absorbs the observation-vs-start skew and&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; cross-platform rounding; it does NOT need to distinguish reuse, since&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; reuse moves the start time by far more than any measurement jitter.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;const&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; DEFAULT_TOLERANCE&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;:&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FE4450;&quot;&gt; Duration&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt; =&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FE4450;&quot;&gt; Duration&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;::&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;from_secs&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt;2&lt;&#x2F;span&gt;&lt;span&gt;);&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;A fuzzy comparison in a security guard should make you nervous. It doesn’t
+here, and the comment explains exactly why: the tolerance absorbs &lt;em&gt;jitter&lt;&#x2F;em&gt;,
+and the threat it defends against operates at a completely different
+magnitude. Nobody’s PID gets recycled within two seconds &lt;em&gt;and&lt;&#x2F;em&gt; lands within
+two seconds of the original start time. The signal and the noise live orders
+of magnitude apart, so a sloppy-looking threshold is in fact a precise one.&lt;&#x2F;p&gt;
+&lt;p&gt;That’s a reusable habit for any threshold you’re tempted to add: don’t ask
+“is this value right,” ask “what’s the ratio between what I’m tolerating and
+what I’m detecting.” If it’s small, you don’t have a threshold problem, you
+have a design problem.&lt;&#x2F;p&gt;
+&lt;p&gt;There’s a subtler trap underneath, and it’s the kind of thing that only
+shows up in production. A start time is meaningless without knowing &lt;em&gt;which
+clock&lt;&#x2F;em&gt; produced it. Linux offers several — &lt;code&gt;CLOCK_REALTIME&lt;&#x2F;code&gt; jumps when NTP
+corrects it, &lt;code&gt;CLOCK_MONOTONIC&lt;&#x2F;code&gt; doesn’t count suspend, &lt;code&gt;CLOCK_BOOTTIME&lt;&#x2F;code&gt;
+does. If the sensor stamps the event from one clock family and the kill
+guard reads the live process from another, your comparison drifts by
+whatever the difference happens to be that day, and your guard starts
+refusing legitimate kills after an NTP correction. The sensor here reads
+&lt;code&gt;task-&amp;gt;start_boottime&lt;&#x2F;code&gt; and applies the REALTIME−BOOTTIME offset precisely so
+both sides of the comparison end up in the same family. Two numbers being
+“a timestamp” is not enough for them to be comparable.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;a-path-is-a-question-not-an-answer&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#a-path-is-a-question-not-an-answer&quot; aria-label=&quot;Anchor link for: a-path-is-a-question-not-an-answer&quot;&gt;A path is a question, not an answer&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Files have the same disease in a more virulent form.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;code&gt;&#x2F;tmp&#x2F;payload.bin&lt;&#x2F;code&gt; is not a file. It’s a &lt;em&gt;query&lt;&#x2F;em&gt; — instructions for
+traversing directories to find an inode — and it’s re-evaluated every single
+time you use it. Between your &lt;code&gt;stat()&lt;&#x2F;code&gt; and your &lt;code&gt;open()&lt;&#x2F;code&gt;, anything with
+write access to any directory along that path can change the answer. That’s
+the TOCTOU (time-of-check to time-of-use) family, and for a security tool
+it’s not a theoretical concern: quarantining a file is precisely the moment
+an attacker most wants to redirect you.&lt;&#x2F;p&gt;
+&lt;p&gt;Imagine quarantine done naively. Hash the path to confirm it’s the malicious
+file. Then move the path into the quarantine store. In between, the attacker
+replaces the path with a symlink to &lt;code&gt;&#x2F;etc&#x2F;shadow&lt;&#x2F;code&gt;. You have just used your
+elevated privileges to hash a known-bad file and quarantine a critical
+system file. Your logs will say the operation succeeded.&lt;&#x2F;p&gt;
+&lt;p&gt;The fix is to stop using the name after the first lookup. From
+&lt;code&gt;shipper&#x2F;src&#x2F;quarantine.rs&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;!   * `FileControl` — the OS primitives (pin a file to one inode&#x2F;object,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;and, concretely:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;                .&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;custom_flags&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FE4450;&quot;&gt;libc&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;::&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FE4450;&quot;&gt;O_NOFOLLOW&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; |&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FE4450;&quot;&gt; libc&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;::&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FE4450;&quot;&gt;O_CLOEXEC&lt;&#x2F;span&gt;&lt;span&gt;)&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;&lt;code&gt;O_NOFOLLOW&lt;&#x2F;code&gt; refuses to traverse a final symlink — so the swap-a-symlink
+attack fails at the door rather than succeeding silently. And once that
+&lt;code&gt;open&lt;&#x2F;code&gt; returns, the file descriptor &lt;em&gt;is&lt;&#x2F;em&gt; the identity. It refers to one
+inode. Renaming the path doesn’t move it, deleting the path doesn’t
+invalidate it, and no amount of directory manipulation can make it point
+somewhere else. Every subsequent operation goes through the descriptor:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;            &#x2F;&#x2F; fchmod on the pinned inode: a path swap cannot redirect it.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;&lt;code&gt;fchmod&lt;&#x2F;code&gt; rather than &lt;code&gt;chmod&lt;&#x2F;code&gt;. &lt;code&gt;fstat&lt;&#x2F;code&gt; rather than &lt;code&gt;stat&lt;&#x2F;code&gt;. The pattern is
+consistent, and once you see it you’ll see it everywhere in well-written
+systems code: &lt;strong&gt;resolve the name exactly once, then work with the handle.&lt;&#x2F;strong&gt;
+The handle is the identity; the path was only ever a way to find it.&lt;&#x2F;p&gt;
+&lt;p&gt;The same code then does something I want to highlight because it’s a habit
+worth stealing:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;                &#x2F;&#x2F; instant; prove the blob IS our pinned inode.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Having moved the file into the store, it &lt;em&gt;verifies&lt;&#x2F;em&gt; that the object now in
+the store is the same object it pinned — and rolls back if not. It doesn’t
+assume the operation it just performed did what it intended. In a system
+where an adversary is actively trying to make your operations mean something
+other than what you meant, that distinction between “I issued the correct
+call” and “the correct thing happened” is the whole game.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;identity-by-content&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#identity-by-content&quot; aria-label=&quot;Anchor link for: identity-by-content&quot;&gt;Identity by content&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Sometimes you don’t want to identify a &lt;em&gt;file&lt;&#x2F;em&gt; at all — you want to identify
+a &lt;em&gt;payload&lt;&#x2F;em&gt;, wherever it happens to live. The same malware dropped at ten
+paths on ten machines is one thing worth tracking, not ten.&lt;&#x2F;p&gt;
+&lt;p&gt;That’s what a cryptographic hash gives you: an identity derived from
+content rather than location. Two files with the same SHA-256 are the same
+payload, no matter what they’re named or which host they’re on.&lt;&#x2F;p&gt;
+&lt;p&gt;The schema in &lt;code&gt;backend&#x2F;schema&#x2F;001_events.sql&lt;&#x2F;code&gt;
+makes a small decision here that reveals something about designing for
+consumers rather than for storage:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- agent-computed sha256 of the executable image, lowercase hex;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- &amp;#39;&amp;#39; = not hashed (EXIT events, vanished file, over the size cap,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- or a sensor without enrichment). Hex, not raw: IOC lists join&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- directly in SQL.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Raw bytes would be half the size. Hex is stored anyway, because every threat
+intelligence feed on earth distributes hashes as lowercase hex, and an
+analyst with a list of indicators should be able to write a join and get an
+answer — not first write a conversion. Sixteen extra bytes per row buys
+frictionless use of the column for its actual purpose. Storage efficiency
+that makes data harder to use is a false economy.&lt;&#x2F;p&gt;
+&lt;p&gt;Note also that &lt;code&gt;&#x27;&#x27;&lt;&#x2F;code&gt; means “no hash,” and the comment enumerates the reasons
+why. Which brings us to the theme that turns out to matter most of all.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;absence-is-not-zero&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#absence-is-not-zero&quot; aria-label=&quot;Anchor link for: absence-is-not-zero&quot;&gt;Absence is not zero&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;If a value can be missing, its absence must be &lt;em&gt;representable&lt;&#x2F;em&gt; and must not
+be confusable with any real value. This sounds obvious. It is violated
+constantly, usually by accident, usually via a language’s default value.&lt;&#x2F;p&gt;
+&lt;p&gt;The uid column is the sharpest example:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- acting process&amp;#39;s real&#x2F;effective uid; 4294967295 = not captured&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- (pre-uid WAL replay or platform without parity). uid 0 IS root,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- so absence must never look like it — rules must exclude the&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- sentinel explicitly.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;The obvious default for a missing integer is 0. For a uid, 0 is &lt;strong&gt;root&lt;&#x2F;strong&gt;.
+Default an unknown user to 0 and every event from a sensor that couldn’t
+determine the user now claims to be a root action. Your detection rules —
+which quite reasonably treat root activity as more interesting — light up
+on a field that means “we don’t know.” You’d have manufactured a false
+positive generator out of a language default.&lt;&#x2F;p&gt;
+&lt;p&gt;The same reasoning appears for timestamps, and the choice of sentinel is
+neatly argued:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- identity (pids recycle, the pair doesn&amp;#39;t). 1970-01-01 00:00:00 =&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- not captured (pre-field agent) — no real process starts at the&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- epoch, so the zero default is unambiguous, unlike uid.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Epoch-0 is safe as a sentinel &lt;em&gt;because no real process starts then&lt;&#x2F;em&gt;. Zero is
+unsafe for uid &lt;em&gt;because uid 0 is real and important&lt;&#x2F;em&gt;. Identical mechanism,
+opposite verdicts — and the difference is entirely about the semantics of
+the domain, not about the type. There is no general rule like “use 0 for
+missing” or “use -1 for missing.” You have to look at what the values mean
+and pick something outside the real range.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;in-kernel-or-not-at-all&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#in-kernel-or-not-at-all&quot; aria-label=&quot;Anchor link for: in-kernel-or-not-at-all&quot;&gt;In-kernel or not at all&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Container attribution is where identity gets genuinely hard, and where the
+solution is instructive.&lt;&#x2F;p&gt;
+&lt;p&gt;The naive approach: an event arrives with a PID; read
+&lt;code&gt;&#x2F;proc&#x2F;&amp;lt;pid&amp;gt;&#x2F;cgroup&lt;&#x2F;code&gt;; parse out the container. It works when you test it.
+It fails in production for a reason you’ve already seen twice in this essay
+— by the time you read &lt;code&gt;&#x2F;proc&lt;&#x2F;code&gt;, the process may be gone, and the PID may
+belong to something else. Your container attribution is now not just missing
+but &lt;em&gt;wrong&lt;&#x2F;em&gt;, and short-lived processes are exactly the ones an attacker
+uses.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;code&gt;shipper&#x2F;src&#x2F;cgroup.rs&lt;&#x2F;code&gt; refuses that whole
+approach:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! module turns that number into the runtime&amp;#39;s container id.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;!&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! Why the inode: on cgroup v2 the id the kernel returns equals the cgroup&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! directory&amp;#39;s inode (its kernfs node id — a full 64-bit ino since 5.5;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! the agent&amp;#39;s BTF-enabled floor sits there). So the mapping is a scan of&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! &#x2F;sys&#x2F;fs&#x2F;cgroup for the directory whose inode matches — keyed on the&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! stable id, never on a pid that may already be gone (the whole reason&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! the id is stamped in-kernel rather than re-read from &#x2F;proc).&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;The eBPF probe calls &lt;code&gt;bpf_get_current_cgroup_id()&lt;&#x2F;code&gt; &lt;em&gt;at event time, in
+kernel context, while the process is definitionally alive&lt;&#x2F;em&gt;. That number
+rides along in the event. Resolution to a human-meaningful container id
+happens later, in user space, at leisure — because unlike the PID, the
+cgroup id is stable and doesn’t recycle out from under you.&lt;&#x2F;p&gt;
+&lt;p&gt;This is the general principle, and it’s the most portable lesson in the
+essay: &lt;strong&gt;capture identity at the moment of the event, in the context where
+it’s unambiguous. Resolve it to something readable whenever you like.&lt;&#x2F;strong&gt;
+Deferring &lt;em&gt;capture&lt;&#x2F;em&gt; is a correctness bug. Deferring &lt;em&gt;resolution&lt;&#x2F;em&gt; is just
+scheduling.&lt;&#x2F;p&gt;
+&lt;p&gt;There’s also a small piece of Linux trivia in there that I enjoy far more
+than I should. The cgroup id &lt;em&gt;equals the directory’s inode number&lt;&#x2F;em&gt;, because
+cgroups are backed by kernfs and the “id” is just the kernfs node id. That’s
+not a documented mapping so much as a consequence of how the thing is built
+— which means the resolver can find the cgroup by scanning for a matching
+inode, with no parsing and no API. Understanding the implementation gave a
+cleaner solution than the interface advertised.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;making-identity-durable&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#making-identity-durable&quot; aria-label=&quot;Anchor link for: making-identity-durable&quot;&gt;Making identity durable&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;The final move is to take these carefully-constructed identities and turn
+them into something you can query, which is where
+&lt;code&gt;backend&#x2F;schema&#x2F;006_process_index.sql&lt;&#x2F;code&gt;
+comes in:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;-- Backend-materialized process index: one row per process identity&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;-- (agent_id, pid, start_time) — pids recycle, the pair doesn&amp;#39;t.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Two events describe a process — its creation and its exit — and they may
+arrive out of order, or twice, or hours apart if a WAL replayed. The index
+has to fold them into one row regardless:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;-- Replay contract: an insert deduplicated by token skips the view too. A&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;-- replay that outlives the token window re-feeds the view, so every&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;-- column is an idempotent fold (min&#x2F;max) — replaying a byte-identical&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;-- row cannot change the folded state. Out-of-order arrival (exit before&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;-- create, WAL replay) folds the same way: merges are order-blind.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Every column folds with &lt;code&gt;min&lt;&#x2F;code&gt; or &lt;code&gt;max&lt;&#x2F;code&gt;. Those operations are commutative,
+associative, and idempotent — which is the algebraic way of saying that
+order doesn’t matter, grouping doesn’t matter, and repetition doesn’t
+matter. Given those three properties, “exit arrived before create” and “this
+batch replayed four times” stop being cases you handle and become cases that
+cannot arise.&lt;&#x2F;p&gt;
+&lt;p&gt;And the sentinel discipline from earlier shows up again, now doing real
+work:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;-- uid&#x2F;euid fold with min so the 4294967295 absence sentinel loses to&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;-- any captured value — and 0 still IS root, never absence.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Because absence is &lt;code&gt;4294967295&lt;&#x2F;code&gt; — the &lt;em&gt;largest&lt;&#x2F;em&gt; possible u32 — folding with
+&lt;code&gt;min&lt;&#x2F;code&gt; means any real value beats it automatically. The choice of sentinel
+and the choice of fold operator were made together, and the result is that
+“prefer a real value over a missing one” needs no conditional logic at all.
+It’s a consequence of arithmetic.&lt;&#x2F;p&gt;
+&lt;p&gt;That’s the thing I’d point at if someone asked what good data modeling looks
+like. Not the absence of special cases, but special cases that dissolve into
+the structure so completely that there’s nothing left to get wrong.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;the-tax-and-the-return&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#the-tax-and-the-return&quot; aria-label=&quot;Anchor link for: the-tax-and-the-return&quot;&gt;The tax and the return&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Look at what all this cost. Every process reference carries a timestamp.
+Every file operation carries a descriptor. Every event carries a cgroup id
+stamped in kernel context. Every nullable column carries an explicitly
+chosen sentinel and a comment defending it. It’s more fields, more plumbing,
+more to explain.&lt;&#x2F;p&gt;
+&lt;p&gt;What it buys is that a whole category of bug becomes impossible rather than
+unlikely. Not “we tested it and didn’t see the race” — actually impossible,
+because a recycled PID cannot match a start time, a descriptor cannot be
+redirected by a rename, and a &lt;code&gt;min&lt;&#x2F;code&gt;-fold cannot be disturbed by a replay.&lt;&#x2F;p&gt;
+&lt;p&gt;Which matters especially here, because the next thing this system does with
+these identities is act on them: terminate the process, quarantine the file,
+cut the machine off the network. Once you’re taking destructive action on a
+remote host, “we’re pretty sure this is the right process” isn’t a standard
+anyone can live with.&lt;&#x2F;p&gt;
+&lt;p&gt;And that raises a question this essay has been carefully avoiding: who gets
+to decide that the action happens at all? That is the authority problem in
+the next essay.&lt;&#x2F;p&gt;
+</content>
+        
+    </entry>
+    <entry xml:lang="en">
+        <title>The Shape of a Pipeline</title>
+        <published>2026-08-12T00:00:00+00:00</published>
+        <updated>2026-08-12T00:00:00+00:00</updated>
+        
+        <author>
+          <name>
+            
+              Unknown
+            
+          </name>
+        </author>
+        
+        <link rel="alternate" type="text/html" href="https://adasumizox.github.io/posts/02-the-shape-of-a-pipeline/"/>
+        <id>https://adasumizox.github.io/posts/02-the-shape-of-a-pipeline/</id>
+        
+        <content type="html" xml:base="https://adasumizox.github.io/posts/02-the-shape-of-a-pipeline/">&lt;p&gt;&lt;em&gt;Building an EDR from scratch, essay 2 of 13.&lt;&#x2F;em&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;Once the three sensors from the last essay are producing events, a
+suspiciously boring problem appears: get the events to a server.&lt;&#x2F;p&gt;
+&lt;p&gt;I say suspiciously because everyone underestimates it, including me. It
+sounds like plumbing. It reads like a weekend of work. And then you sit
+down to write it and discover that you are re-deriving, from scratch, the
+same structure that sits inside Kafka, inside PostgreSQL’s WAL, inside
+&lt;code&gt;journald&lt;&#x2F;code&gt;, inside every message queue you’ve ever used, and — if you go
+back far enough — inside TCP.&lt;&#x2F;p&gt;
+&lt;p&gt;That convergence is the interesting thing. This essay is about why the
+shape is nearly forced, which decisions inside it are actually free, and
+the one place where I think the conventional answer is a lie people tell
+in marketing copy.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;three-things-you-can-do-when-you-can-t-keep-up&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#three-things-you-can-do-when-you-can-t-keep-up&quot; aria-label=&quot;Anchor link for: three-things-you-can-do-when-you-can-t-keep-up&quot;&gt;Three things you can do when you can’t keep up&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Start with the only situation that matters. Data is arriving faster than
+you can move it along. You have exactly three options, and there is no
+fourth:&lt;&#x2F;p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;Drop it.&lt;&#x2F;strong&gt; Throw away data. Fast, bounded, and lossy.&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;strong&gt;Buffer it.&lt;&#x2F;strong&gt; Hold it somewhere. Preserves data, and converts a
+throughput problem into a memory problem, which is a worse problem
+because it kills the whole process instead of one event.&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;strong&gt;Push back.&lt;&#x2F;strong&gt; Refuse to accept more until you’ve caught up, so the
+pressure propagates upstream to whoever is producing.&lt;&#x2F;li&gt;
+&lt;&#x2F;ol&gt;
+&lt;p&gt;Every stage of every pipeline picks one. A system’s character is entirely
+determined by which stage picks which, and the failure you get in
+production is always the failure of whichever stage picked &lt;em&gt;drop&lt;&#x2F;em&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;Here is the thing that took me longest to internalize: &lt;strong&gt;backpressure is
+not a way to avoid dropping data. It’s a way to choose where the dropping
+happens.&lt;&#x2F;strong&gt; If the producer is a kernel probe watching a machine that is
+compiling a large C++ project, the events exist whether or not anyone is
+ready. Pressure has to terminate somewhere. Pushing back moves the
+overflow up the chain; it doesn’t delete it.&lt;&#x2F;p&gt;
+&lt;p&gt;So the real design question isn’t “how do we never lose events.” It’s
+&lt;strong&gt;where do we want the loss, and can that place be honest about it?&lt;&#x2F;strong&gt;&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;putting-the-loss-where-it-can-be-counted&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#putting-the-loss-where-it-can-be-counted&quot; aria-label=&quot;Anchor link for: putting-the-loss-where-it-can-be-counted&quot;&gt;Putting the loss where it can be counted&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;The answer this agent settles on is stated as an invariant, and it’s the
+single most load-bearing sentence in the codebase: the kernel-adjacent ring
+is the only place allowed to drop events — and it counts what it drops.&lt;&#x2F;p&gt;
+&lt;p&gt;Both halves matter, and the second half is the one people forget.&lt;&#x2F;p&gt;
+&lt;p&gt;The kernel ring is the right place to lose data for unglamorous reasons.
+It is a fixed-size allocation that exists whether you like it or not. It
+sits at the boundary where the producer genuinely cannot be slowed down —
+you are not going to make a process-creation event wait while your
+userspace agent catches up, because that would mean the security tool is
+now a performance bottleneck in &lt;code&gt;fork()&lt;&#x2F;code&gt;, which is how you get uninstalled.
+And critically, the kernel gives you a drop counter for free, because it
+knows exactly how many times it failed to write.&lt;&#x2F;p&gt;
+&lt;p&gt;That last property is what turns a data loss into a &lt;em&gt;known&lt;&#x2F;em&gt; data loss, and
+the difference between those two is the whole ballgame. A pipeline that
+loses 4% of events and reports “everything is fine” is worse than useless
+— it’s actively misleading, because an analyst will interpret the absence
+of an event as evidence that nothing happened. A pipeline that loses 4% and
+says so lets you make a decision: add capacity, tune the filters, or accept
+the gap knowingly.&lt;&#x2F;p&gt;
+&lt;p&gt;Everything downstream of the ring, therefore, is forbidden from dropping.
+It must push back instead. You can watch the invariant being enforced in
+one line in
+&lt;code&gt;shipper&#x2F;src&#x2F;linux_sensor.rs&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! events into the shipper&amp;#39;s bounded channel. blocking_send provides the&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! backpressure link: a stalled shipper stops this loop and overflow is&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;&lt;code&gt;blocking_send&lt;&#x2F;code&gt;, not &lt;code&gt;try_send&lt;&#x2F;code&gt;. The distinction is four characters wide
+and it’s the entire policy. &lt;code&gt;try_send&lt;&#x2F;code&gt; would return an error when the
+channel is full, and the natural thing to write next is a &lt;code&gt;continue&lt;&#x2F;code&gt; — at
+which point you have quietly created a second drop site, uncounted,
+invisible, in user space. &lt;code&gt;blocking_send&lt;&#x2F;code&gt; instead parks the reader thread,
+which stops draining the kernel ring, which pushes the overflow back to the
+one place designed to absorb it.&lt;&#x2F;p&gt;
+&lt;p&gt;A bounded channel with a blocking send &lt;em&gt;is&lt;&#x2F;em&gt; the backpressure. There’s no
+framework involved. The design lives in a function name.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;why-exactly-once-is-a-marketing-term&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#why-exactly-once-is-a-marketing-term&quot; aria-label=&quot;Anchor link for: why-exactly-once-is-a-marketing-term&quot;&gt;Why “exactly once” is a marketing term&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Now the events need to cross a network to a backend, and here we meet the
+most persistently misunderstood problem in distributed systems.&lt;&#x2F;p&gt;
+&lt;p&gt;You send a batch. You don’t get a response. What happened?&lt;&#x2F;p&gt;
+&lt;p&gt;Maybe the batch never arrived. Maybe it arrived, was written to the
+database, and the acknowledgement was lost on the way back. From where you
+sit those two situations are &lt;em&gt;indistinguishable&lt;&#x2F;em&gt; — the evidence available
+to you is identical — and yet they demand opposite actions. Resending is
+correct in the first case and creates a duplicate in the second.&lt;&#x2F;p&gt;
+&lt;p&gt;There is no protocol that fixes this. You cannot add a handshake, because
+the acknowledgement of the handshake can also be lost, forever, turtles all
+the way down. This is the Two Generals problem and it is not an engineering
+gap, it’s a proof.&lt;&#x2F;p&gt;
+&lt;p&gt;So “exactly once delivery” does not exist. What exists — and what every
+mature system actually does, whatever the brochure says — is &lt;strong&gt;at-least-once
+delivery plus idempotent processing&lt;&#x2F;strong&gt;. Send until acknowledged, accept
+duplicates as normal, and make the receiver’s handling of a duplicate a
+no-op. The system’s &lt;em&gt;observable behavior&lt;&#x2F;em&gt; is exactly-once. The delivery
+never was.&lt;&#x2F;p&gt;
+&lt;p&gt;The receiving half is a single line in
+&lt;code&gt;backend&#x2F;src&#x2F;lib.rs&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;                .&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;with_option&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;insert_deduplication_token&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; &amp;amp;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;&quot;&gt;token&lt;&#x2F;span&gt;&lt;span&gt;);&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;The token is &lt;code&gt;&amp;lt;agent_id&amp;gt;:&amp;lt;sequence&amp;gt;&lt;&#x2F;code&gt;. ClickHouse remembers recently-seen
+tokens and silently discards an insert that repeats one. The agent is free
+to be dumb and persistent; the backend makes repetition harmless.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;the-constraint-nobody-warns-you-about&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#the-constraint-nobody-warns-you-about&quot; aria-label=&quot;Anchor link for: the-constraint-nobody-warns-you-about&quot;&gt;The constraint nobody warns you about&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Here’s where it stops being textbook, and it’s my favorite thing in the
+whole pipeline.&lt;&#x2F;p&gt;
+&lt;p&gt;Once you’ve decided that identity is &lt;code&gt;(agent_id, sequence)&lt;&#x2F;code&gt; attached to a
+&lt;em&gt;batch&lt;&#x2F;em&gt;, you have — without necessarily noticing — signed a contract that
+constrains you forever after. From
+&lt;code&gt;shipper&#x2F;src&#x2F;queue.rs&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! Because the backend dedupes on (agent_id, sequence), recovery must resend&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! the exact batches as originally constructed — re-batching the same events&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! under an old sequence would get them silently deduped away. So the WAL&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! stores whole batches, and replay bypasses the batching logic entirely.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Read that failure mode carefully, because it’s beautifully nasty. Suppose
+after a crash you replay your unsent events and, being tidy, you repack
+them into fuller batches. Batch 100 originally held events A and B; now
+batch 100 holds A, B, C, and D. You send it. The backend sees token
+&lt;code&gt;agent:100&lt;&#x2F;code&gt;, recognizes it, and drops the insert as a duplicate.&lt;&#x2F;p&gt;
+&lt;p&gt;Events C and D are gone. Not delayed — &lt;em&gt;gone&lt;&#x2F;em&gt;, permanently, and with a
+successful acknowledgement returned to the agent. No error is logged
+anywhere. Your metrics are green. The data is missing.&lt;&#x2F;p&gt;
+&lt;p&gt;The lesson generalizes well beyond this codebase: &lt;strong&gt;when you make an
+identifier the basis of deduplication, you freeze the boundaries of whatever
+that identifier names.&lt;&#x2F;strong&gt; The batch stopped being a transient performance
+optimization the moment it became an identity. It’s now a durable structure
+you are not allowed to reorganize.&lt;&#x2F;p&gt;
+&lt;p&gt;Which is exactly why the write-ahead log stores whole encoded batches, and
+why replay is a separate code path that walks the disk rather than
+re-entering the batcher. The pipeline has a “no re-batching” rule the way a
+database has a “no rewriting history” rule, and for the same underlying
+reason.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;what-durability-actually-costs&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#what-durability-actually-costs&quot; aria-label=&quot;Anchor link for: what-durability-actually-costs&quot;&gt;What durability actually costs&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;The write-ahead log itself is the oldest trick in the book: write the data
+to disk and force it to physical media &lt;em&gt;before&lt;&#x2F;em&gt; you tell anyone you have
+it, and reclaim the space only after someone else has taken responsibility.&lt;&#x2F;p&gt;
+&lt;p&gt;The header spells the ordering out:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! Durable on-disk queue: a write-ahead log of EventBatch records so events&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! survive a shipper restart. A batch is appended and fsync&amp;#39;d *before* the&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! first send attempt and reclaimed only after the backend acks it.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;&lt;code&gt;fsync&lt;&#x2F;code&gt; before the first attempt, reclaim after the ack. Those two
+bookends define a window in which the data exists in two places at once,
+and that redundancy is the entire point. Every durable system in existence
+is some variation on this trick.&lt;&#x2F;p&gt;
+&lt;p&gt;The part that separates a real WAL from a toy one is what happens when you
+find damage on startup:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! missing cursor is safe: everything replays and the backend dedupes. A&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! torn record at the tail of the *last* segment is a normal crash artifact&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! and is truncated away; corruption anywhere else is a hard error.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;This is a small masterclass in thinking about failure, so let me unpack the
+three cases separately.&lt;&#x2F;p&gt;
+&lt;p&gt;A &lt;strong&gt;torn record at the tail of the last segment&lt;&#x2F;strong&gt; is what a crash &lt;em&gt;looks
+like&lt;&#x2F;em&gt;. You were in the middle of appending; the machine lost power; the
+final record is half-written. That isn’t corruption, it’s the expected
+physical signature of an interruption. Truncate it and move on — the events
+in it were never acknowledged to anyone, so nothing is lost that anyone
+believes exists.&lt;&#x2F;p&gt;
+&lt;p&gt;A &lt;strong&gt;damaged record in the middle&lt;&#x2F;strong&gt; is a different animal entirely. Nothing
+in normal operation writes there. Its presence means a bad disk, a filesystem
+bug, or something modifying your files. Recovering from that by skipping the
+bad record would be the worst possible choice: you’d silently drop unknown
+data and continue as if healthy. So it’s a hard error, loudly.&lt;&#x2F;p&gt;
+&lt;p&gt;A &lt;strong&gt;missing ack cursor&lt;&#x2F;strong&gt; is safe to lose because losing it can only cause
+&lt;em&gt;over&lt;&#x2F;em&gt;-delivery — you replay batches the backend already has, and the
+deduplication makes that free. The cursor is an optimization, and it’s
+designed so that its failure mode lands on the harmless side.&lt;&#x2F;p&gt;
+&lt;p&gt;That’s the design principle underneath all three: for every piece of state,
+ask which direction its corruption pushes you, and arrange for the cheap
+direction to be the one that happens. Redundant work: fine. Silent data
+loss: never.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;decoupling-and-the-luxury-of-a-slow-consumer&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#decoupling-and-the-luxury-of-a-slow-consumer&quot; aria-label=&quot;Anchor link for: decoupling-and-the-luxury-of-a-slow-consumer&quot;&gt;Decoupling, and the luxury of a slow consumer&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;The last structural idea is visible in the module header of
+&lt;code&gt;shipper&#x2F;src&#x2F;ship.rs&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! Batching gRPC publisher, decoupled into a batcher and a sender that&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! meet at the durable queue: the batcher drains the channel and appends&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! every batch to the WAL; the sender reads batches back off disk and&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! delivers them at-least-once (same sequence until acked). A dead&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! backend therefore parks only the sender — telemetry keeps flowing to&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! disk up to Config::max_queue_bytes, past which the batcher stops&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! consuming and backpressure walks channel -&amp;gt; reader thread -&amp;gt; kernel&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! ring (still the only place designed to drop).&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Two independent components that never speak to each other; they share only
+a file. The batcher’s job is to get events onto disk. The sender’s job is to
+get things off disk and onto the network. Neither knows the other exists.&lt;&#x2F;p&gt;
+&lt;p&gt;The consequence is that a backend outage — which is the common case, not
+the exotic one; deploys happen, networks partition — degrades gracefully
+along a predictable path. The sender parks. The batcher keeps writing.
+Telemetry accumulates on disk, which is cheap and enormous. Only when the
+disk cap is reached does pressure resume its walk up the chain toward the
+kernel ring.&lt;&#x2F;p&gt;
+&lt;p&gt;There’s a nice systems-thinking observation buried in there. Introducing an
+intermediate storage layer didn’t just add buffering — it &lt;strong&gt;changed the
+failure mode from correlated to independent&lt;&#x2F;strong&gt;. Without the WAL, a network
+problem immediately becomes a kernel-ring problem, because the whole chain
+is rigidly coupled and pressure transmits instantly. With it, the two
+failures are separated by hours of disk capacity. Same components, one
+extra layer, and an outage that would have cost you telemetry now costs you
+nothing but disk space.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;boring-on-purpose&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#boring-on-purpose&quot; aria-label=&quot;Anchor link for: boring-on-purpose&quot;&gt;Boring on purpose&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Look at what the finished pipeline actually is. A bounded channel. A
+blocking send. A size-and-time batcher. An append-only log with CRCs. A
+retry loop. A dedupe token.&lt;&#x2F;p&gt;
+&lt;p&gt;Not one of those is clever. There is no novel algorithm anywhere, nothing
+you couldn’t explain to a competent engineer in a minute each. And that’s
+the achievement rather than an apology for it — because this layer sits
+between kernel code that can crash a machine and a detection engine whose
+correctness depends utterly on its input being complete. It is the part of
+the system that &lt;em&gt;must&lt;&#x2F;em&gt; be reasoned about without effort, at 3am, by someone
+who didn’t write it.&lt;&#x2F;p&gt;
+&lt;p&gt;The interesting decisions were all about placement and honesty. Put the
+lossy stage where loss is unavoidable and countable. Put durability before
+the first send, not after. Keep failures independent by inserting a layer
+between them. Make every piece of state fail toward redundant work rather
+than toward silence.&lt;&#x2F;p&gt;
+&lt;p&gt;Do that, and what’s left is boring. Which means the thinking worked.&lt;&#x2F;p&gt;
+&lt;p&gt;The next problem doesn’t yield to boring, though. Once you have a complete,
+durable stream of events, you have to say &lt;em&gt;what each one happened to&lt;&#x2F;em&gt; — and
+on a running machine, the things you’re naming keep disappearing and the
+names keep getting reused. That identity problem is where the next essay
+begins.&lt;&#x2F;p&gt;
+</content>
+        
+    </entry>
+    <entry xml:lang="en">
+        <title>How an Operating System Decides to Let You Watch It</title>
+        <published>2026-08-05T00:00:00+00:00</published>
+        <updated>2026-08-05T00:00:00+00:00</updated>
+        
+        <author>
+          <name>
+            
+              Unknown
+            
+          </name>
+        </author>
+        
+        <link rel="alternate" type="text/html" href="https://adasumizox.github.io/posts/01-how-an-os-lets-you-watch-it/"/>
+        <id>https://adasumizox.github.io/posts/01-how-an-os-lets-you-watch-it/</id>
+        
+        <content type="html" xml:base="https://adasumizox.github.io/posts/01-how-an-os-lets-you-watch-it/">&lt;p&gt;&lt;em&gt;Building an EDR from scratch, essay 1 of 13.&lt;&#x2F;em&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;Here is an awkward fact about endpoint security software: the program you
+want to install and the program you want to catch are asking the operating
+system for the same things.&lt;&#x2F;p&gt;
+&lt;p&gt;Both want to see every process that starts. Both want to know when files
+are written. Both want to watch the network. Both want to survive reboots,
+resist termination, and run before the user logs in. If you squint at the
+capability list of an EDR agent and the capability list of a competent
+rootkit, they are the same list. The difference is intent, and intent is
+not something a kernel can typecheck.&lt;&#x2F;p&gt;
+&lt;p&gt;So every operating system has had to answer a question that has no clean
+technical answer: &lt;em&gt;how do we let someone watch everything, without letting
+everyone watch everything?&lt;&#x2F;em&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;Windows, Linux, and macOS each answered it differently. Not slightly
+differently — differently in kind, from different first principles, with
+different ideas about where trust comes from. And because the answer is a
+trust model rather than an API, it propagates upward. It shapes what your
+sensor can observe, what it costs to be wrong, and — this is the part I
+did not expect — &lt;em&gt;when in the software lifecycle your mistakes become
+visible&lt;&#x2F;em&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;That last one turned out to be the most useful lens I found. Let me get
+there the long way.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;three-answers-to-one-question&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#three-answers-to-one-question&quot; aria-label=&quot;Anchor link for: three-answers-to-one-question&quot;&gt;Three answers to one question&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;I’ll name the three models before defending them, because having the words
+makes the rest of this readable:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Windows trusts by ceremony.&lt;&#x2F;strong&gt; You may enter the kernel. First, perform
+the rituals.&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;strong&gt;Linux trusts by proof.&lt;&#x2F;strong&gt; You may not be trusted, so submit your program
+for mechanical verification and it will run only if safety is provable.&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;strong&gt;macOS trusts by brokerage.&lt;&#x2F;strong&gt; You may not enter the kernel at all.
+Apple will go inside, look around, and tell you what it saw.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;Each is internally coherent. Each is, I think, defensible. And each one
+extracts a completely different tax.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;windows-the-bet-on-ceremony&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#windows-the-bet-on-ceremony&quot; aria-label=&quot;Anchor link for: windows-the-bet-on-ceremony&quot;&gt;Windows: the bet on ceremony&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;The Windows model is the oldest and the most straightforward: security
+software runs in the kernel, with the same privileges as the kernel,
+because that is where the information is. There is no sandbox. If your
+driver dereferences a bad pointer at &lt;code&gt;DISPATCH_LEVEL&lt;&#x2F;code&gt;, the machine
+bugchecks, and every user of that machine finds out at once.&lt;&#x2F;p&gt;
+&lt;p&gt;Given that, Windows does not try to make your code safe. It tries to make
+sure that only code someone was willing to &lt;em&gt;sign their name to&lt;&#x2F;em&gt; gets to be
+unsafe. Trust is established out of band — a signing certificate, an
+attestation process, a company with a legal identity — and enforced at load
+time.&lt;&#x2F;p&gt;
+&lt;p&gt;What I find architecturally interesting is how thoroughly that ceremony is
+woven into the APIs themselves. It isn’t a single check at the door. The
+privileged APIs individually refuse to work for a driver that hasn’t
+performed the ritual. From the header comment in
+&lt;code&gt;windows&#x2F;driver&#x2F;edr_driver.c&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;c&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; *&lt;&#x2F;span&gt;&lt;span&gt; MUST be linked &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;&#x2F;&lt;&#x2F;span&gt;&lt;span&gt;INTEGRITYCHECK or PsSetCreateProcessNotifyRoutineEx&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; *&lt;&#x2F;span&gt;&lt;span&gt; fails with &lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;STATUS_ACCESS_DENIED&lt;&#x2F;span&gt;&lt;span&gt; (&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt;0xC0000022&lt;&#x2F;span&gt;&lt;span&gt;).&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;&lt;code&gt;&#x2F;INTEGRITYCHECK&lt;&#x2F;code&gt; is a flag that marks the image as requiring signature
+verification at load. Note what’s happening: the process-notification API
+won’t talk to you unless your binary has &lt;em&gt;asked to be held to a stricter
+standard&lt;&#x2F;em&gt;. It’s an opt-in that gates a capability. You can’t accidentally
+get process-creation visibility; you have to declare, in your link line,
+that you intend to be the kind of code that is checked.&lt;&#x2F;p&gt;
+&lt;p&gt;The other half of the Windows model is stranger and more human. Filesystem
+minifilters — the mechanism for seeing file operations — stack in an order
+determined by a number called an &lt;strong&gt;altitude&lt;&#x2F;strong&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;plain&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt; *   reg add HKLM\SYSTEM\CurrentControlSet\Services\&amp;lt;svc&amp;gt;\Instances\EdrAgentInstance&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt; *       &#x2F;v Altitude &#x2F;t REG_SZ &#x2F;d 385100 &#x2F;f&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt; * (385100 sits in the FSFilter Activity Monitor range 360000-389999;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Think about what an altitude actually is. Every filter driver on the system
+sits at a point in a global, numeric, totally-ordered namespace. Antivirus
+lives around 320000. Activity monitors live in 360000–389999. Encryption
+drivers live lower, so they see plaintext. Replication drivers live higher.
+Your position determines whether you observe a write before or after some
+other vendor’s product transforms it — which means it determines whether
+your product &lt;em&gt;works&lt;&#x2F;em&gt; in the presence of theirs.&lt;&#x2F;p&gt;
+&lt;p&gt;And the allocation of these numbers is not enforced by the kernel. It is
+administered by Microsoft, by request, as a registry of reserved ranges.
+It’s a social protocol wearing a &lt;code&gt;REG_SZ&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;I love this as a design artifact, because it’s an honest admission that the
+hard problem in kernel-mode security software was never memory safety — it
+was &lt;em&gt;coordination between mutually distrustful vendors who all want to be
+first&lt;&#x2F;em&gt;. Windows solved it with a phone book. My driver uses 385100 because
+it’s in the right neighborhood and nobody else on my lab machine is home;
+a shipping product would have that number assigned to it, in writing.&lt;&#x2F;p&gt;
+&lt;p&gt;The payoff for all this ceremony is that Windows gives you the sharpest
+semantics of the three platforms. When &lt;code&gt;PsSetCreateProcessNotifyRoutineEx&lt;&#x2F;code&gt;
+fires, you are inside process creation, holding structures the kernel is
+using, before the first instruction of the new image runs. Nothing is
+inferred. Nothing is a heuristic. You are standing in the room where it
+happens.&lt;&#x2F;p&gt;
+&lt;p&gt;The tax is that the room has no railings.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;linux-the-bet-on-proof&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#linux-the-bet-on-proof&quot; aria-label=&quot;Anchor link for: linux-the-bet-on-proof&quot;&gt;Linux: the bet on proof&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Linux, arriving at the same problem two decades later and with a very
+different culture, made close to the opposite bet. Rather than deciding
+&lt;em&gt;who&lt;&#x2F;em&gt; may run unsafe code in the kernel, it asked whether the code could be
+made safe enough that the question doesn’t matter.&lt;&#x2F;p&gt;
+&lt;p&gt;eBPF is the answer, and the verifier is the mechanism. You submit a program
+in a restricted instruction set; a static analyzer in the kernel simulates
+every reachable path and refuses to load anything it can’t prove terminates,
+stays in bounds, and touches only what it’s allowed to touch. If the proof
+succeeds, the program is JIT-compiled and runs at native speed in kernel
+context. If it fails, you get a rejection and a stack trace, and nothing
+happens to the machine.&lt;&#x2F;p&gt;
+&lt;p&gt;This inverts the cost structure completely. On Windows, the cost of a
+mistake is paid at runtime, by the customer, as a blue screen. On Linux,
+it’s paid at development time, by me, as an argument with a program that
+cannot be talked out of its position.&lt;&#x2F;p&gt;
+&lt;p&gt;What makes this more than a sandbox story is where the verifier’s
+constraints show up in the &lt;em&gt;design&lt;&#x2F;em&gt; of the sensor. Consider a snippet from
+the exec probe in
+&lt;code&gt;linux&#x2F;bpf&#x2F;edr_probes.bpf.c&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;c&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;	&#x2F;* Stack copies: key&#x2F;value pointers into the ringbuf reservation are&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;	 * a verifier gamble across kernels; the stack is always legal. *&#x2F;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;	pid &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span&gt; ev&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;-&amp;gt;&lt;&#x2F;span&gt;&lt;span&gt;pid;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;	ppid &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span&gt; ev&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;-&amp;gt;&lt;&#x2F;span&gt;&lt;span&gt;ppid;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;	bpf_map_update_elem&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;&amp;amp;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;font-style: italic;&quot;&gt;exec_ppid&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; &amp;amp;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;font-style: italic;&quot;&gt;pid&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; &amp;amp;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;font-style: italic;&quot;&gt;ppid&lt;&#x2F;span&gt;&lt;span&gt;, BPF_ANY);&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;There is a perfectly good copy of &lt;code&gt;pid&lt;&#x2F;code&gt; sitting in the ring buffer
+reservation two lines up. Copying it to the stack first is redundant work
+in any normal program. But whether the verifier accepts a pointer into a
+ring-buffer reservation as a map key varies across kernel versions, and a
+program that loads on my laptop and is rejected on a customer’s 5.10 kernel
+is a support incident, not a bug report. So the code carries an extra
+assignment forever, as a compatibility hedge.&lt;&#x2F;p&gt;
+&lt;p&gt;That’s the real shape of eBPF development. You are not writing C for a
+machine; you are writing C for a proof checker whose exact reasoning powers
+differ between the kernels your program must run on. The verifier is a
+compiler audience with opinions.&lt;&#x2F;p&gt;
+&lt;p&gt;The second half of the Linux answer addresses a different problem, and it’s
+one Windows never had to solve. Kernel data structures on Linux are not a
+stable ABI. &lt;code&gt;struct task_struct&lt;&#x2F;code&gt; is laid out differently in every kernel
+build, sometimes differently between two distributions of the same version.
+A sensor that reads &lt;code&gt;task-&amp;gt;start_boottime&lt;&#x2F;code&gt; at a hardcoded offset is
+correct exactly once.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;CO-RE&lt;&#x2F;strong&gt; — Compile Once, Run Everywhere — fixes this by shipping type
+information with the kernel (BTF) and having the loader relocate every
+field access at load time against the layout the running kernel actually
+has. &lt;code&gt;BPF_CORE_READ(bprm, filename)&lt;&#x2F;code&gt; compiles to a relocation entry, not
+an offset. The kernel tells you where &lt;code&gt;filename&lt;&#x2F;code&gt; lives on &lt;em&gt;this&lt;&#x2F;em&gt; machine,
+today.&lt;&#x2F;p&gt;
+&lt;p&gt;Step back and notice what those two mechanisms together represent. The
+verifier says: &lt;em&gt;I don’t trust your code, so prove it.&lt;&#x2F;em&gt; CO-RE says: &lt;em&gt;I don’t
+trust your assumptions about me, so ask at runtime.&lt;&#x2F;em&gt; Linux replaced the
+vendor-trust relationship with a pair of machine-checked contracts. That’s
+a genuinely different theory of how to make a kernel extensible, and it
+puts the burden on the extension author rather than on a certificate
+authority.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;macos-the-bet-on-brokerage&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#macos-the-bet-on-brokerage&quot; aria-label=&quot;Anchor link for: macos-the-bet-on-brokerage&quot;&gt;macOS: the bet on brokerage&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Apple looked at kernel extensions and concluded the entire category was a
+mistake.&lt;&#x2F;p&gt;
+&lt;p&gt;Not “risky.” Not “in need of better tooling.” A mistake — third-party code
+in the kernel was a permanent, unfixable source of instability and
+compromise, and the right move was to remove the capability from the
+platform. Kexts were deprecated, then walled off behind boot-policy changes
+that a normal user will never make.&lt;&#x2F;p&gt;
+&lt;p&gt;But security software still needs the data. So Apple built
+&lt;strong&gt;Endpoint Security&lt;&#x2F;strong&gt;: Apple’s own code sits at the kernel hook points, and
+your agent — running in &lt;em&gt;user space&lt;&#x2F;em&gt;, as an ordinary process — subscribes to
+a stream of events over a framework API. You get the semantics of kernel
+instrumentation with the failure domain of a user process. If your ES
+client segfaults, your ES client segfaults. The machine keeps running.&lt;&#x2F;p&gt;
+&lt;p&gt;Here’s the subscription from the shim in
+&lt;code&gt;macos&#x2F;esf&#x2F;edr_esf_shim.c&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;c&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FE4450;&quot;&gt;    es_event_type_t&lt;&#x2F;span&gt;&lt;span&gt; events&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;[]&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt; =&lt;&#x2F;span&gt;&lt;span&gt; {&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;        ES_EVENT_TYPE_NOTIFY_EXEC,     ES_EVENT_TYPE_NOTIFY_EXIT,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;        ES_EVENT_TYPE_NOTIFY_CREATE,   ES_EVENT_TYPE_NOTIFY_CLOSE,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;        ES_EVENT_TYPE_NOTIFY_TRUNCATE, ES_EVENT_TYPE_NOTIFY_UNLINK,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;        ES_EVENT_TYPE_NOTIFY_RENAME,   ES_EVENT_TYPE_NOTIFY_MMAP,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;That reads like a config file. On Windows the equivalent capability is a
+signed kernel driver with a registered altitude and a callback running at
+elevated IRQL. On macOS it’s an array of enum values passed to a library
+function from a process that could, in principle, be a shell script’s
+child. The complexity didn’t vanish — Apple absorbed it, and now maintains
+it on your behalf.&lt;&#x2F;p&gt;
+&lt;p&gt;The tax is subtle and it comes due in two places.&lt;&#x2F;p&gt;
+&lt;p&gt;The first is that &lt;strong&gt;the broker decides what exists&lt;&#x2F;strong&gt;. On Windows or Linux
+you can, with enough determination, hook something nobody anticipated you’d
+want. Under ES, if Apple hasn’t modeled an event type, that event is not
+merely hard to observe — it is unobservable, and your options are a feature
+request and a wait measured in major OS releases.&lt;&#x2F;p&gt;
+&lt;p&gt;The interesting flip side is that a broker can also model things the other
+platforms &lt;em&gt;don’t have words for&lt;&#x2F;em&gt;. Two entries further down that same array:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;c&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;        &#x2F;* Mach task-port acquisition (macOS 10.15 &#x2F; 12.0). CONTROL + READ&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;         * only — INSPECT&#x2F;NAME are dominated by diagnostics tooling. *&#x2F;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;        ES_EVENT_TYPE_NOTIFY_GET_TASK, ES_EVENT_TYPE_NOTIFY_GET_TASK_READ,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;A Mach task port is a capability handle to another process’s address space.
+Acquiring one is the macOS injection primitive — the thing that stands
+where &lt;code&gt;OpenProcess&lt;&#x2F;code&gt; + &lt;code&gt;WriteProcessMemory&lt;&#x2F;code&gt; stands on Windows. There is no
+equivalent event on the other two platforms in this codebase, because Mach
+ports are a macOS abstraction and Apple chose to model access to them
+explicitly. The broker can be &lt;em&gt;more&lt;&#x2F;em&gt; expressive than raw hooking, when the
+broker understands its own OS’s semantics better than an outsider would.&lt;&#x2F;p&gt;
+&lt;p&gt;The second tax is the one that turned out to matter most in practice, and
+it’s the reason I ended up thinking about all of this in terms of &lt;em&gt;time&lt;&#x2F;em&gt;.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;where-your-mistakes-surface&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#where-your-mistakes-surface&quot; aria-label=&quot;Anchor link for: where-your-mistakes-surface&quot;&gt;Where your mistakes surface&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Under Endpoint Security, permission is not a runtime check that returns an
+error code. Permission is an &lt;strong&gt;entitlement&lt;&#x2F;strong&gt;: a cryptographic grant, issued
+by Apple, to a specific developer account, after a review. Your binary
+carries it in its signature.&lt;&#x2F;p&gt;
+&lt;p&gt;Development builds can fake this. With System Integrity Protection relaxed
+and &lt;code&gt;amfi_get_out_of_my_way&lt;&#x2F;code&gt; set, an ad-hoc-signed client with a synthetic
+entitlement will be accepted by &lt;code&gt;es_new_client&lt;&#x2F;code&gt;, and events flow. Every
+category in that array above is delivered on my dev VM.&lt;&#x2F;p&gt;
+&lt;p&gt;Except one. TCC-modification events — notifications that a privacy grant
+(camera, microphone, full disk access) changed — are gated more strictly
+than the rest. The client connects. The subscription succeeds. No error is
+returned anywhere. And no &lt;code&gt;TCC_MODIFY&lt;&#x2F;code&gt; event is ever delivered, because
+the faked entitlement clears the door but not that particular room.&lt;&#x2F;p&gt;
+&lt;p&gt;There is no bug to find. The code is right. The only fix is a genuine
+Apple-issued entitlement, which is a business process, not an engineering
+one.&lt;&#x2F;p&gt;
+&lt;p&gt;And that, finally, is the pattern I want to leave you with. Line the three
+models up by &lt;em&gt;when a mistake becomes visible&lt;&#x2F;em&gt;:&lt;&#x2F;p&gt;
+&lt;table&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;&lt;&#x2F;th&gt;&lt;th&gt;Trust model&lt;&#x2F;th&gt;&lt;th&gt;Mistakes surface at&lt;&#x2F;th&gt;&lt;th&gt;Failure mode&lt;&#x2F;th&gt;&lt;&#x2F;tr&gt;&lt;&#x2F;thead&gt;&lt;tbody&gt;
+&lt;tr&gt;&lt;td&gt;&lt;strong&gt;Windows&lt;&#x2F;strong&gt;&lt;&#x2F;td&gt;&lt;td&gt;Ceremony — sign, register, enter&lt;&#x2F;td&gt;&lt;td&gt;&lt;strong&gt;Runtime&lt;&#x2F;strong&gt;, on the customer’s machine&lt;&#x2F;td&gt;&lt;td&gt;Loud and catastrophic (bugcheck)&lt;&#x2F;td&gt;&lt;&#x2F;tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;strong&gt;Linux&lt;&#x2F;strong&gt;&lt;&#x2F;td&gt;&lt;td&gt;Proof — submit to the verifier&lt;&#x2F;td&gt;&lt;td&gt;&lt;strong&gt;Load time&lt;&#x2F;strong&gt;, on your machine&lt;&#x2F;td&gt;&lt;td&gt;Loud and safe (rejection with a trace)&lt;&#x2F;td&gt;&lt;&#x2F;tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;strong&gt;macOS&lt;&#x2F;strong&gt;&lt;&#x2F;td&gt;&lt;td&gt;Brokerage — Apple looks for you&lt;&#x2F;td&gt;&lt;td&gt;&lt;strong&gt;Deployment&lt;&#x2F;strong&gt;, at organizational scale&lt;&#x2F;td&gt;&lt;td&gt;&lt;em&gt;Silent&lt;&#x2F;em&gt; — an event class that simply never arrives&lt;&#x2F;td&gt;&lt;&#x2F;tr&gt;
+&lt;&#x2F;tbody&gt;&lt;&#x2F;table&gt;
+&lt;p&gt;Windows fails at the worst time in the worst way, but tells you
+unambiguously. Linux fails at the best possible time, before anything is at
+risk, and the price is that you argue with a proof checker for an afternoon.
+macOS fails at the strangest time — long after the code is written and
+tested — and the failure is an absence, which is the hardest thing in the
+world to notice.&lt;&#x2F;p&gt;
+&lt;p&gt;Every one of these is a coherent engineering position. But they aren’t
+interchangeable, and this is why an EDR agent cannot have one unified
+sensor abstraction that “handles platform differences.” The differences
+aren’t in the API surface. They’re in what the platform believes about you,
+and belief doesn’t refactor.&lt;&#x2F;p&gt;
+&lt;p&gt;What &lt;em&gt;can&lt;&#x2F;em&gt; be unified is everything downstream. Once an event exists — a
+process started, a file was written, a task port was acquired — the
+questions become identical everywhere: how do you not lose it, how do you
+name the thing it happened to, who is allowed to act on it. Three sensors,
+three trust models, one contract from there on.&lt;&#x2F;p&gt;
+&lt;p&gt;The next essay follows that contract downstream and asks why telemetry
+pipelines keep converging on the same shape.&lt;&#x2F;p&gt;
+</content>
+        
+    </entry>
+</feed>
