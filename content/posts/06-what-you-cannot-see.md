@@ -1,7 +1,7 @@
 +++
 title = "What You Cannot See"
-date = "2026-09-14"
-draft = true
+date = "2026-09-09"
+draft = false
 description = "Every endpoint sensor has structural blind spots. The important skill is identifying, testing, and documenting them."
 
 [extra]
