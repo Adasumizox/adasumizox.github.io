@@ -1,0 +1,286 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en">
+    <title>Daniel&#x27;s Detection Notes - Process Monitoring</title>
+    <subtitle>Hands-on detection engineering notes by Daniel Jeczen: building EDR and SIEM labs, exploring Windows telemetry, and turning security events into useful detections.</subtitle>
+    <link rel="self" type="application/atom+xml" href="https://adasumizox.github.io/tags/process-monitoring/atom.xml"/>
+    <link rel="alternate" type="text/html" href="https://adasumizox.github.io"/>
+    <generator uri="https://www.getzola.org/">Zola</generator>
+    <updated>2026-08-19T00:00:00+00:00</updated>
+    <id>https://adasumizox.github.io/tags/process-monitoring/atom.xml</id>
+    <entry xml:lang="en">
+        <title>Naming Things That Move</title>
+        <published>2026-08-19T00:00:00+00:00</published>
+        <updated>2026-08-19T00:00:00+00:00</updated>
+        
+        <author>
+          <name>
+            
+              Unknown
+            
+          </name>
+        </author>
+        
+        <link rel="alternate" type="text/html" href="https://adasumizox.github.io/posts/03-naming-things-that-move/"/>
+        <id>https://adasumizox.github.io/posts/03-naming-things-that-move/</id>
+        
+        <content type="html" xml:base="https://adasumizox.github.io/posts/03-naming-things-that-move/">&lt;p&gt;&lt;em&gt;Building an EDR from scratch, essay 3 of 13.&lt;&#x2F;em&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;An analyst looks at an alert and clicks &lt;em&gt;kill this process&lt;&#x2F;em&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;Between that click and the signal, a few hundred milliseconds pass. In
+those milliseconds the process exits on its own — it was a short-lived
+script, it was always going to exit — and the kernel, being a good steward
+of a small resource, hands its process ID to the next thing that asks. On a
+busy machine that might be a database backend, a session manager, or the
+SSH daemon holding the connection your incident responder is sitting in.&lt;&#x2F;p&gt;
+&lt;p&gt;The signal arrives. It is delivered, correctly and successfully, to
+something that has nothing to do with the alert.&lt;&#x2F;p&gt;
+&lt;p&gt;This is not an exotic race. It’s the ordinary consequence of a fact so
+familiar that it hides in plain sight: &lt;strong&gt;a PID is not an identity. It’s a
+name, drawn from a small pool, that gets recycled.&lt;&#x2F;strong&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;Endpoint telemetry is full of this. Almost everything you want to talk
+about is short-lived, and almost every name you have for those things is
+either recycled, mutable, or both. Getting this wrong doesn’t produce a
+crash — it produces a system that is confidently, quietly, wrong about
+which thing it’s discussing. This essay is about the general shape of the
+problem and the handful of moves that solve it.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;what-makes-a-name-an-identity&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#what-makes-a-name-an-identity&quot; aria-label=&quot;Anchor link for: what-makes-a-name-an-identity&quot;&gt;What makes a name an identity&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Three properties separate a usable identity from a mere label:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Unique&lt;&#x2F;strong&gt; at any instant. Two live things never share it.&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;strong&gt;Stable&lt;&#x2F;strong&gt; for the lifetime of what it names. It doesn’t change underneath
+you.&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;strong&gt;Non-recycled&lt;&#x2F;strong&gt; across lifetimes. Once a thing is gone, its identity is
+never issued to a different thing.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;PIDs have the first two and spectacularly fail the third. Filesystem paths
+fail the second &lt;em&gt;and&lt;&#x2F;em&gt; the third — a path is a lookup, resolved fresh every
+time you use it, and someone else can change what it resolves to between
+your two uses. Names that fail the third property are the dangerous ones,
+because failure looks like success: you get an answer, it’s just about a
+different object than you meant.&lt;&#x2F;p&gt;
+&lt;p&gt;The recurring fix, in every case below, is the same: &lt;strong&gt;pair the unrecycled
+name with something that pins down &lt;em&gt;which&lt;&#x2F;em&gt; lifetime you meant.&lt;&#x2F;strong&gt;&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;the-pair-that-doesn-t-recycle&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#the-pair-that-doesn-t-recycle&quot; aria-label=&quot;Anchor link for: the-pair-that-doesn-t-recycle&quot;&gt;The pair that doesn’t recycle&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;For processes, the second half of the pair is the start time. PIDs cycle;
+the &lt;em&gt;combination&lt;&#x2F;em&gt; of a PID and the moment that PID began doesn’t, because
+time doesn’t run backwards.&lt;&#x2F;p&gt;
+&lt;p&gt;The kill action in &lt;code&gt;shipper&#x2F;src&#x2F;kill.rs&lt;&#x2F;code&gt; builds its
+entire safety story on this:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! PID reuse is the whole problem (see proto KillProcessAction): the task&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! carries the intended victim&amp;#39;s start time, and a kill proceeds only if the&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! LIVE process at that pid has a matching start time (within tolerance).&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! A recycled pid always starts later than the one the operator saw, so it&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! never matches — the guard refuses instead of killing an innocent process.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;The operator’s task doesn’t say “kill PID 4823.” It says “kill PID 4823,
+which started at 14:22:07.431.” Before signalling, the agent reads the start
+time of whatever is &lt;em&gt;currently&lt;&#x2F;em&gt; living at 4823 and compares. Mismatch means
+the thing you meant is already gone, and the correct action is to refuse.&lt;&#x2F;p&gt;
+&lt;p&gt;Note the asymmetry that makes this airtight: a recycled PID always starts
+&lt;em&gt;later&lt;&#x2F;em&gt; than the one the operator observed. The comparison can never be
+fooled by a reused PID, because reuse only ever moves the timestamp forward,
+past any plausible measurement error.&lt;&#x2F;p&gt;
+&lt;p&gt;Which is what licenses something that would otherwise look sloppy:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; How far a live process&amp;#39;s start time may differ from the requested one and&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; still count as the same process. Absorbs the observation-vs-start skew and&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; cross-platform rounding; it does NOT need to distinguish reuse, since&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; reuse moves the start time by far more than any measurement jitter.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;const&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; DEFAULT_TOLERANCE&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;:&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FE4450;&quot;&gt; Duration&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt; =&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FE4450;&quot;&gt; Duration&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;::&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;from_secs&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt;2&lt;&#x2F;span&gt;&lt;span&gt;);&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;A fuzzy comparison in a security guard should make you nervous. It doesn’t
+here, and the comment explains exactly why: the tolerance absorbs &lt;em&gt;jitter&lt;&#x2F;em&gt;,
+and the threat it defends against operates at a completely different
+magnitude. Nobody’s PID gets recycled within two seconds &lt;em&gt;and&lt;&#x2F;em&gt; lands within
+two seconds of the original start time. The signal and the noise live orders
+of magnitude apart, so a sloppy-looking threshold is in fact a precise one.&lt;&#x2F;p&gt;
+&lt;p&gt;That’s a reusable habit for any threshold you’re tempted to add: don’t ask
+“is this value right,” ask “what’s the ratio between what I’m tolerating and
+what I’m detecting.” If it’s small, you don’t have a threshold problem, you
+have a design problem.&lt;&#x2F;p&gt;
+&lt;p&gt;There’s a subtler trap underneath, and it’s the kind of thing that only
+shows up in production. A start time is meaningless without knowing &lt;em&gt;which
+clock&lt;&#x2F;em&gt; produced it. Linux offers several — &lt;code&gt;CLOCK_REALTIME&lt;&#x2F;code&gt; jumps when NTP
+corrects it, &lt;code&gt;CLOCK_MONOTONIC&lt;&#x2F;code&gt; doesn’t count suspend, &lt;code&gt;CLOCK_BOOTTIME&lt;&#x2F;code&gt;
+does. If the sensor stamps the event from one clock family and the kill
+guard reads the live process from another, your comparison drifts by
+whatever the difference happens to be that day, and your guard starts
+refusing legitimate kills after an NTP correction. The sensor here reads
+&lt;code&gt;task-&amp;gt;start_boottime&lt;&#x2F;code&gt; and applies the REALTIME−BOOTTIME offset precisely so
+both sides of the comparison end up in the same family. Two numbers being
+“a timestamp” is not enough for them to be comparable.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;a-path-is-a-question-not-an-answer&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#a-path-is-a-question-not-an-answer&quot; aria-label=&quot;Anchor link for: a-path-is-a-question-not-an-answer&quot;&gt;A path is a question, not an answer&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Files have the same disease in a more virulent form.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;code&gt;&#x2F;tmp&#x2F;payload.bin&lt;&#x2F;code&gt; is not a file. It’s a &lt;em&gt;query&lt;&#x2F;em&gt; — instructions for
+traversing directories to find an inode — and it’s re-evaluated every single
+time you use it. Between your &lt;code&gt;stat()&lt;&#x2F;code&gt; and your &lt;code&gt;open()&lt;&#x2F;code&gt;, anything with
+write access to any directory along that path can change the answer. That’s
+the TOCTOU (time-of-check to time-of-use) family, and for a security tool
+it’s not a theoretical concern: quarantining a file is precisely the moment
+an attacker most wants to redirect you.&lt;&#x2F;p&gt;
+&lt;p&gt;Imagine quarantine done naively. Hash the path to confirm it’s the malicious
+file. Then move the path into the quarantine store. In between, the attacker
+replaces the path with a symlink to &lt;code&gt;&#x2F;etc&#x2F;shadow&lt;&#x2F;code&gt;. You have just used your
+elevated privileges to hash a known-bad file and quarantine a critical
+system file. Your logs will say the operation succeeded.&lt;&#x2F;p&gt;
+&lt;p&gt;The fix is to stop using the name after the first lookup. From
+&lt;code&gt;shipper&#x2F;src&#x2F;quarantine.rs&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;!   * `FileControl` — the OS primitives (pin a file to one inode&#x2F;object,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;and, concretely:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;                .&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;custom_flags&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FE4450;&quot;&gt;libc&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;::&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FE4450;&quot;&gt;O_NOFOLLOW&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; |&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FE4450;&quot;&gt; libc&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;::&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FE4450;&quot;&gt;O_CLOEXEC&lt;&#x2F;span&gt;&lt;span&gt;)&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;&lt;code&gt;O_NOFOLLOW&lt;&#x2F;code&gt; refuses to traverse a final symlink — so the swap-a-symlink
+attack fails at the door rather than succeeding silently. And once that
+&lt;code&gt;open&lt;&#x2F;code&gt; returns, the file descriptor &lt;em&gt;is&lt;&#x2F;em&gt; the identity. It refers to one
+inode. Renaming the path doesn’t move it, deleting the path doesn’t
+invalidate it, and no amount of directory manipulation can make it point
+somewhere else. Every subsequent operation goes through the descriptor:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;            &#x2F;&#x2F; fchmod on the pinned inode: a path swap cannot redirect it.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;&lt;code&gt;fchmod&lt;&#x2F;code&gt; rather than &lt;code&gt;chmod&lt;&#x2F;code&gt;. &lt;code&gt;fstat&lt;&#x2F;code&gt; rather than &lt;code&gt;stat&lt;&#x2F;code&gt;. The pattern is
+consistent, and once you see it you’ll see it everywhere in well-written
+systems code: &lt;strong&gt;resolve the name exactly once, then work with the handle.&lt;&#x2F;strong&gt;
+The handle is the identity; the path was only ever a way to find it.&lt;&#x2F;p&gt;
+&lt;p&gt;The same code then does something I want to highlight because it’s a habit
+worth stealing:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;                &#x2F;&#x2F; instant; prove the blob IS our pinned inode.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Having moved the file into the store, it &lt;em&gt;verifies&lt;&#x2F;em&gt; that the object now in
+the store is the same object it pinned — and rolls back if not. It doesn’t
+assume the operation it just performed did what it intended. In a system
+where an adversary is actively trying to make your operations mean something
+other than what you meant, that distinction between “I issued the correct
+call” and “the correct thing happened” is the whole game.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;identity-by-content&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#identity-by-content&quot; aria-label=&quot;Anchor link for: identity-by-content&quot;&gt;Identity by content&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Sometimes you don’t want to identify a &lt;em&gt;file&lt;&#x2F;em&gt; at all — you want to identify
+a &lt;em&gt;payload&lt;&#x2F;em&gt;, wherever it happens to live. The same malware dropped at ten
+paths on ten machines is one thing worth tracking, not ten.&lt;&#x2F;p&gt;
+&lt;p&gt;That’s what a cryptographic hash gives you: an identity derived from
+content rather than location. Two files with the same SHA-256 are the same
+payload, no matter what they’re named or which host they’re on.&lt;&#x2F;p&gt;
+&lt;p&gt;The schema in &lt;code&gt;backend&#x2F;schema&#x2F;001_events.sql&lt;&#x2F;code&gt;
+makes a small decision here that reveals something about designing for
+consumers rather than for storage:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- agent-computed sha256 of the executable image, lowercase hex;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- &amp;#39;&amp;#39; = not hashed (EXIT events, vanished file, over the size cap,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- or a sensor without enrichment). Hex, not raw: IOC lists join&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- directly in SQL.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Raw bytes would be half the size. Hex is stored anyway, because every threat
+intelligence feed on earth distributes hashes as lowercase hex, and an
+analyst with a list of indicators should be able to write a join and get an
+answer — not first write a conversion. Sixteen extra bytes per row buys
+frictionless use of the column for its actual purpose. Storage efficiency
+that makes data harder to use is a false economy.&lt;&#x2F;p&gt;
+&lt;p&gt;Note also that &lt;code&gt;&#x27;&#x27;&lt;&#x2F;code&gt; means “no hash,” and the comment enumerates the reasons
+why. Which brings us to the theme that turns out to matter most of all.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;absence-is-not-zero&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#absence-is-not-zero&quot; aria-label=&quot;Anchor link for: absence-is-not-zero&quot;&gt;Absence is not zero&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;If a value can be missing, its absence must be &lt;em&gt;representable&lt;&#x2F;em&gt; and must not
+be confusable with any real value. This sounds obvious. It is violated
+constantly, usually by accident, usually via a language’s default value.&lt;&#x2F;p&gt;
+&lt;p&gt;The uid column is the sharpest example:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- acting process&amp;#39;s real&#x2F;effective uid; 4294967295 = not captured&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- (pre-uid WAL replay or platform without parity). uid 0 IS root,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- so absence must never look like it — rules must exclude the&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- sentinel explicitly.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;The obvious default for a missing integer is 0. For a uid, 0 is &lt;strong&gt;root&lt;&#x2F;strong&gt;.
+Default an unknown user to 0 and every event from a sensor that couldn’t
+determine the user now claims to be a root action. Your detection rules —
+which quite reasonably treat root activity as more interesting — light up
+on a field that means “we don’t know.” You’d have manufactured a false
+positive generator out of a language default.&lt;&#x2F;p&gt;
+&lt;p&gt;The same reasoning appears for timestamps, and the choice of sentinel is
+neatly argued:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- identity (pids recycle, the pair doesn&amp;#39;t). 1970-01-01 00:00:00 =&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- not captured (pre-field agent) — no real process starts at the&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- epoch, so the zero default is unambiguous, unlike uid.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Epoch-0 is safe as a sentinel &lt;em&gt;because no real process starts then&lt;&#x2F;em&gt;. Zero is
+unsafe for uid &lt;em&gt;because uid 0 is real and important&lt;&#x2F;em&gt;. Identical mechanism,
+opposite verdicts — and the difference is entirely about the semantics of
+the domain, not about the type. There is no general rule like “use 0 for
+missing” or “use -1 for missing.” You have to look at what the values mean
+and pick something outside the real range.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;in-kernel-or-not-at-all&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#in-kernel-or-not-at-all&quot; aria-label=&quot;Anchor link for: in-kernel-or-not-at-all&quot;&gt;In-kernel or not at all&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Container attribution is where identity gets genuinely hard, and where the
+solution is instructive.&lt;&#x2F;p&gt;
+&lt;p&gt;The naive approach: an event arrives with a PID; read
+&lt;code&gt;&#x2F;proc&#x2F;&amp;lt;pid&amp;gt;&#x2F;cgroup&lt;&#x2F;code&gt;; parse out the container. It works when you test it.
+It fails in production for a reason you’ve already seen twice in this essay
+— by the time you read &lt;code&gt;&#x2F;proc&lt;&#x2F;code&gt;, the process may be gone, and the PID may
+belong to something else. Your container attribution is now not just missing
+but &lt;em&gt;wrong&lt;&#x2F;em&gt;, and short-lived processes are exactly the ones an attacker
+uses.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;code&gt;shipper&#x2F;src&#x2F;cgroup.rs&lt;&#x2F;code&gt; refuses that whole
+approach:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! module turns that number into the runtime&amp;#39;s container id.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;!&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! Why the inode: on cgroup v2 the id the kernel returns equals the cgroup&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! directory&amp;#39;s inode (its kernfs node id — a full 64-bit ino since 5.5;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! the agent&amp;#39;s BTF-enabled floor sits there). So the mapping is a scan of&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! &#x2F;sys&#x2F;fs&#x2F;cgroup for the directory whose inode matches — keyed on the&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! stable id, never on a pid that may already be gone (the whole reason&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! the id is stamped in-kernel rather than re-read from &#x2F;proc).&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;The eBPF probe calls &lt;code&gt;bpf_get_current_cgroup_id()&lt;&#x2F;code&gt; &lt;em&gt;at event time, in
+kernel context, while the process is definitionally alive&lt;&#x2F;em&gt;. That number
+rides along in the event. Resolution to a human-meaningful container id
+happens later, in user space, at leisure — because unlike the PID, the
+cgroup id is stable and doesn’t recycle out from under you.&lt;&#x2F;p&gt;
+&lt;p&gt;This is the general principle, and it’s the most portable lesson in the
+essay: &lt;strong&gt;capture identity at the moment of the event, in the context where
+it’s unambiguous. Resolve it to something readable whenever you like.&lt;&#x2F;strong&gt;
+Deferring &lt;em&gt;capture&lt;&#x2F;em&gt; is a correctness bug. Deferring &lt;em&gt;resolution&lt;&#x2F;em&gt; is just
+scheduling.&lt;&#x2F;p&gt;
+&lt;p&gt;There’s also a small piece of Linux trivia in there that I enjoy far more
+than I should. The cgroup id &lt;em&gt;equals the directory’s inode number&lt;&#x2F;em&gt;, because
+cgroups are backed by kernfs and the “id” is just the kernfs node id. That’s
+not a documented mapping so much as a consequence of how the thing is built
+— which means the resolver can find the cgroup by scanning for a matching
+inode, with no parsing and no API. Understanding the implementation gave a
+cleaner solution than the interface advertised.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;making-identity-durable&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#making-identity-durable&quot; aria-label=&quot;Anchor link for: making-identity-durable&quot;&gt;Making identity durable&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;The final move is to take these carefully-constructed identities and turn
+them into something you can query, which is where
+&lt;code&gt;backend&#x2F;schema&#x2F;006_process_index.sql&lt;&#x2F;code&gt;
+comes in:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;-- Backend-materialized process index: one row per process identity&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;-- (agent_id, pid, start_time) — pids recycle, the pair doesn&amp;#39;t.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Two events describe a process — its creation and its exit — and they may
+arrive out of order, or twice, or hours apart if a WAL replayed. The index
+has to fold them into one row regardless:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;-- Replay contract: an insert deduplicated by token skips the view too. A&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;-- replay that outlives the token window re-feeds the view, so every&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;-- column is an idempotent fold (min&#x2F;max) — replaying a byte-identical&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;-- row cannot change the folded state. Out-of-order arrival (exit before&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;-- create, WAL replay) folds the same way: merges are order-blind.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Every column folds with &lt;code&gt;min&lt;&#x2F;code&gt; or &lt;code&gt;max&lt;&#x2F;code&gt;. Those operations are commutative,
+associative, and idempotent — which is the algebraic way of saying that
+order doesn’t matter, grouping doesn’t matter, and repetition doesn’t
+matter. Given those three properties, “exit arrived before create” and “this
+batch replayed four times” stop being cases you handle and become cases that
+cannot arise.&lt;&#x2F;p&gt;
+&lt;p&gt;And the sentinel discipline from earlier shows up again, now doing real
+work:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;-- uid&#x2F;euid fold with min so the 4294967295 absence sentinel loses to&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;-- any captured value — and 0 still IS root, never absence.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Because absence is &lt;code&gt;4294967295&lt;&#x2F;code&gt; — the &lt;em&gt;largest&lt;&#x2F;em&gt; possible u32 — folding with
+&lt;code&gt;min&lt;&#x2F;code&gt; means any real value beats it automatically. The choice of sentinel
+and the choice of fold operator were made together, and the result is that
+“prefer a real value over a missing one” needs no conditional logic at all.
+It’s a consequence of arithmetic.&lt;&#x2F;p&gt;
+&lt;p&gt;That’s the thing I’d point at if someone asked what good data modeling looks
+like. Not the absence of special cases, but special cases that dissolve into
+the structure so completely that there’s nothing left to get wrong.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;the-tax-and-the-return&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#the-tax-and-the-return&quot; aria-label=&quot;Anchor link for: the-tax-and-the-return&quot;&gt;The tax and the return&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Look at what all this cost. Every process reference carries a timestamp.
+Every file operation carries a descriptor. Every event carries a cgroup id
+stamped in kernel context. Every nullable column carries an explicitly
+chosen sentinel and a comment defending it. It’s more fields, more plumbing,
+more to explain.&lt;&#x2F;p&gt;
+&lt;p&gt;What it buys is that a whole category of bug becomes impossible rather than
+unlikely. Not “we tested it and didn’t see the race” — actually impossible,
+because a recycled PID cannot match a start time, a descriptor cannot be
+redirected by a rename, and a &lt;code&gt;min&lt;&#x2F;code&gt;-fold cannot be disturbed by a replay.&lt;&#x2F;p&gt;
+&lt;p&gt;Which matters especially here, because the next thing this system does with
+these identities is act on them: terminate the process, quarantine the file,
+cut the machine off the network. Once you’re taking destructive action on a
+remote host, “we’re pretty sure this is the right process” isn’t a standard
+anyone can live with.&lt;&#x2F;p&gt;
+&lt;p&gt;And that raises a question this essay has been carefully avoiding: who gets
+to decide that the action happens at all? That is the authority problem in
+the next essay.&lt;&#x2F;p&gt;
+</content>
+        
+    </entry>
+</feed>
