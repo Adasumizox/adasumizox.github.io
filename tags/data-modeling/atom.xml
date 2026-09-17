@@ -1,0 +1,255 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en">
+    <title>Daniel&#x27;s Detection Notes - Data Modeling</title>
+    <subtitle>Hands-on detection engineering notes by Daniel Jeczen: building EDR and SIEM labs, exploring Windows telemetry, and turning security events into useful detections.</subtitle>
+    <link rel="self" type="application/atom+xml" href="https://adasumizox.github.io/tags/data-modeling/atom.xml"/>
+    <link rel="alternate" type="text/html" href="https://adasumizox.github.io"/>
+    <generator uri="https://www.getzola.org/">Zola</generator>
+    <updated>2026-09-17T00:00:00+00:00</updated>
+    <id>https://adasumizox.github.io/tags/data-modeling/atom.xml</id>
+    <entry xml:lang="en">
+        <title>Detection Is a Data-Modeling Problem</title>
+        <published>2026-09-17T00:00:00+00:00</published>
+        <updated>2026-09-17T00:00:00+00:00</updated>
+        
+        <author>
+          <name>
+            
+              Unknown
+            
+          </name>
+        </author>
+        
+        <link rel="alternate" type="text/html" href="https://adasumizox.github.io/posts/07-detection-as-data-modeling/"/>
+        <id>https://adasumizox.github.io/posts/07-detection-as-data-modeling/</id>
+        
+        <content type="html" xml:base="https://adasumizox.github.io/posts/07-detection-as-data-modeling/">&lt;p&gt;&lt;em&gt;Building an EDR from scratch, essay 7 of 13.&lt;&#x2F;em&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;Detection engineering has a glamorous reputation. It’s the part with the
+attacker in it — behavioral analytics, threat hunting, the rule that catches
+the thing nobody else caught.&lt;&#x2F;p&gt;
+&lt;p&gt;Having now built a small one, my honest assessment is that the clever rules
+are the easy part, and they’re not where the failures live. The failures
+live in the data model underneath: whether a rule &lt;em&gt;can&lt;&#x2F;em&gt; express what you
+mean, whether it means the same thing tomorrow, and — the one that nearly
+got me — whether the system tells you when it has quietly stopped working.&lt;&#x2F;p&gt;
+&lt;p&gt;This essay is about that substrate.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;one-vocabulary-two-purposes&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#one-vocabulary-two-purposes&quot; aria-label=&quot;Anchor link for: one-vocabulary-two-purposes&quot;&gt;One vocabulary, two purposes&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;The first decision sounds like an implementation detail and turns out to
+shape everything. From &lt;code&gt;backend&#x2F;src&#x2F;detect.rs&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! Rules match the *normalized* EventRow (post-flatten), not raw proto:&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! field names in a rule are the ClickHouse column names, so a rule that&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! works in SQL works here and vice versa.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Rules could have matched against the protobuf message — it’s what arrives on
+the wire, and it’s the natural object in the code. Instead they match the
+flattened database row, using database column names.&lt;&#x2F;p&gt;
+&lt;p&gt;The reason is a workflow, not a technical constraint. Real detection
+engineering goes like this: an analyst is hunting, writing SQL against
+historical events, and finds something. A query returns rows that shouldn’t
+exist. Now they want that query to run continuously against new data.&lt;&#x2F;p&gt;
+&lt;p&gt;If rules speak a different language than queries, that transition is a
+translation step — and translation is where meaning quietly drifts. The
+analyst’s &lt;code&gt;WHERE reg_key LIKE &#x27;%\CurrentVersion\Run%&#x27;&lt;&#x2F;code&gt; becomes some
+&lt;code&gt;registry.key_path&lt;&#x2F;code&gt; field in a rule DSL, and the two are &lt;em&gt;almost&lt;&#x2F;em&gt; the same,
+and the difference surfaces six months later as an alert that never fired.&lt;&#x2F;p&gt;
+&lt;p&gt;When both speak the same names, promoting a hunt to a rule is copying a
+condition. And it works in reverse, which is just as valuable: given an
+alert, you can paste its condition into SQL and ask “how often did this
+happen last month?” The investigation and the detection are the same
+sentence in the same language.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;Make the exploratory tool and the production tool speak the same
+vocabulary.&lt;&#x2F;strong&gt; The friction you remove is conceptual, not typing.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;correctness-and-volume-are-different-problems&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#correctness-and-volume-are-different-problems&quot; aria-label=&quot;Anchor link for: correctness-and-volume-are-different-problems&quot;&gt;Correctness and volume are different problems&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;The second idea is a separation that I think a lot of systems get wrong by
+conflating.&lt;&#x2F;p&gt;
+&lt;p&gt;Two things sound similar: &lt;em&gt;don’t record the same alert twice&lt;&#x2F;em&gt; and &lt;em&gt;don’t
+spam the analyst&lt;&#x2F;em&gt;. They are unrelated problems, and this engine solves them
+with unrelated mechanisms — deliberately.&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! works in SQL works here and vice versa. Evaluation is pure — the same&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! rows always yield the same alerts — which is what makes replay safe:&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! an alert&amp;#39;s identity is (agent_id, sequence, event_index, rule_id), so&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! a replayed WAL batch re-derives byte-identical alert keys&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Alert identity is derived entirely from its inputs: which agent, which
+event, which rule. No timestamps of evaluation, no counters, no randomness.
+So when a WAL batch replays — which, per &lt;a href=&quot;https:&#x2F;&#x2F;adasumizox.github.io&#x2F;posts&#x2F;02-the-shape-of-a-pipeline&#x2F;&quot;&gt;essay 2&lt;&#x2F;a&gt;,
+is routine — the same alerts are re-derived with the same keys and collapse
+in the database exactly like the events do.&lt;&#x2F;p&gt;
+&lt;p&gt;This is the dedupe token idea from the pipeline, applied one plane up, and it
+works for the same reason: identity computed from content is stable under
+repetition. Purity isn’t an aesthetic preference here. It’s the property that
+makes replay safe, and any impurity — an evaluation timestamp in the key, say
+— would silently break it.&lt;&#x2F;p&gt;
+&lt;p&gt;Noise suppression is the other problem, and note how differently it’s
+treated:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! Noise suppression is separate from replay dedupe and deliberately&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! best-effort: an in-memory window per (rule_id, agent_id) that survives&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! neither restarts nor multi-instance deployments — the deterministic&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! alert key is what guarantees correctness, suppression only reduces&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! volume.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Suppression is explicitly allowed to be wrong. It lives in memory, dies on
+restart, and doesn’t coordinate across instances. If a backend restarts, you
+might see a duplicate alert you’d have preferred to suppress. Nobody’s
+correctness is violated; someone is mildly annoyed.&lt;&#x2F;p&gt;
+&lt;p&gt;That’s a completely legitimate place to be sloppy — &lt;em&gt;provided&lt;&#x2F;em&gt; you’re clear
+about which mechanism carries the guarantee. The failure I’ve seen in real
+systems is using the suppression cache as the deduplication mechanism, at
+which point a restart doesn’t produce a duplicate alert, it produces a
+&lt;strong&gt;missing&lt;&#x2F;strong&gt; one, and nobody notices because the alert that didn’t fire is
+invisible.&lt;&#x2F;p&gt;
+&lt;p&gt;Which leads directly to the subtlest line in the module:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! volume. The check&#x2F;commit split is load-bearing: evaluate() only READS&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! the window and commit() is called strictly after the alert insert&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! succeeded, so an alert whose insert failed is never remembered as&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! &amp;quot;already fired&amp;quot; and lost on the retry.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Evaluation reads the suppression window. It does not update it. The update
+happens only after the alert has actually been written.&lt;&#x2F;p&gt;
+&lt;p&gt;Get that ordering backwards — mark it suppressed at evaluation time, then
+insert — and here’s your incident: the database write fails, the retry
+arrives, the suppression window says “already fired,” and the alert is
+dropped. It was never stored anywhere. The only trace is a metric counter
+that doesn’t match.&lt;&#x2F;p&gt;
+&lt;p&gt;The general rule is worth stating carefully because it’s violated everywhere:
+&lt;strong&gt;a record that says “I did X” must be written after X, never before.&lt;&#x2F;strong&gt; The
+window between attempt and confirmation is exactly where crashes and errors
+live, and a system that has already recorded success on entering that window
+cannot tell the difference between done and never-happened.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;knowing-what-your-data-means&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#knowing-what-your-data-means&quot; aria-label=&quot;Anchor link for: knowing-what-your-data-means&quot;&gt;Knowing what your data means&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Now my favorite rule-writing detail, because it isn’t about rules at all.
+From &lt;code&gt;backend&#x2F;rules&#x2F;README.md&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;plain&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;Every string condition here uses the ASCII-case-insensitive form&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;(`contains_i`, `eq_i`). The registry is a case-insensitive namespace, so&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;the case recorded in the event is the *writer&amp;#39;s* choice, not a fact about&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;the key: a value that does not already exist is stored with whatever case&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;created it. A case-sensitive `reg_value_name eq &amp;quot;Debugger&amp;quot;` would miss&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;`debugger` for free, which is not a detection worth shipping.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Sit with “the case recorded in the event is the writer’s choice, not a fact
+about the key.”&lt;&#x2F;p&gt;
+&lt;p&gt;The Windows registry is case-insensitive but case-&lt;em&gt;preserving&lt;&#x2F;em&gt;. Create a
+value named &lt;code&gt;debugger&lt;&#x2F;code&gt; and the registry stores it as &lt;code&gt;debugger&lt;&#x2F;code&gt; while
+treating it as identical to &lt;code&gt;Debugger&lt;&#x2F;code&gt; for every lookup. Windows will happily
+use it. Your telemetry faithfully records the lowercase form. And a rule
+matching &lt;code&gt;Debugger&lt;&#x2F;code&gt; exactly sees nothing.&lt;&#x2F;p&gt;
+&lt;p&gt;That’s not a bug in the sensor — the sensor reported precisely what
+happened. It’s a rule that mistook an &lt;em&gt;incidental encoding&lt;&#x2F;em&gt; for &lt;em&gt;semantic
+content&lt;&#x2F;em&gt;. And the bypass costs an attacker exactly one keystroke, with no
+tooling and no cleverness.&lt;&#x2F;p&gt;
+&lt;p&gt;You cannot find this class of bug by testing your rule, because your test
+will use the canonical casing, and it will pass. You find it by asking a
+question about the data itself: &lt;strong&gt;for this field, which parts of the value
+are meaningful and which are the writer’s arbitrary choice?&lt;&#x2F;strong&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;The same question, asked elsewhere, produces: paths on case-insensitive
+filesystems, domain names, HTTP headers, Unicode normalization forms,
+trailing dots on FQDNs, &lt;code&gt;&#x2F;tmp&lt;&#x2F;code&gt; versus &lt;code&gt;&#x2F;private&#x2F;tmp&lt;&#x2F;code&gt; on macOS. Every one is a
+place where two representations mean the same thing, and where a comparison
+that doesn’t know it becomes a free bypass.&lt;&#x2F;p&gt;
+&lt;p&gt;The packaged rule shows what this looks like in practice — note that &lt;em&gt;both&lt;&#x2F;em&gt;
+conditions use the &lt;code&gt;_i&lt;&#x2F;code&gt; form:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;json&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;  &amp;quot;where&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;: [&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;    {&lt;&#x2F;span&gt;&lt;span style=&quot;color: #72F1B8;&quot;&gt;&amp;quot;field&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;:&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;quot;reg_key&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #72F1B8;&quot;&gt; &amp;quot;op&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;:&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;quot;contains_i&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #72F1B8;&quot;&gt; &amp;quot;value&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;:&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;quot;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;\\&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;CurrentVersion&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;\\&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;Run&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;},&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;    {&lt;&#x2F;span&gt;&lt;span style=&quot;color: #72F1B8;&quot;&gt;&amp;quot;field&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;:&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;quot;reg_data&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #72F1B8;&quot;&gt; &amp;quot;op&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;:&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;quot;contains_i&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #72F1B8;&quot;&gt; &amp;quot;value&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;:&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;quot;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;\\&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;AppData&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;\\&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;}&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;  ],&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;The key path is case-insensitive because the registry is. But &lt;code&gt;reg_data&lt;&#x2F;code&gt; is
+a &lt;em&gt;filesystem path the attacker chose&lt;&#x2F;em&gt;, and &lt;code&gt;C:\Users\bob\appdata\roaming\x.exe&lt;&#x2F;code&gt;
+works perfectly well on Windows. Any field an adversary controls the encoding
+of needs the same treatment, for the same reason.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;when-healthy-is-a-lie&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#when-healthy-is-a-lie&quot; aria-label=&quot;Anchor link for: when-healthy-is-a-lie&quot;&gt;When healthy is a lie&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Now the story that reorganized how I think about validation, and it’s the
+reason this essay exists.&lt;&#x2F;p&gt;
+&lt;p&gt;The alerts table has an &lt;code&gt;event_type&lt;&#x2F;code&gt; column, an enum listing every event
+type an alert can be about. It was created with 11 types. Meanwhile the
+events table grew — module loads, process access, TCC, exec-maps, registry —
+to 23. The alerts enum never followed.&lt;&#x2F;p&gt;
+&lt;p&gt;So a rule matching on, say, &lt;code&gt;registry_value_set&lt;&#x2F;code&gt; produced an alert whose
+&lt;code&gt;event_type&lt;&#x2F;code&gt; byte had no corresponding enum member. Here’s what happened
+next, from &lt;code&gt;backend&#x2F;schema&#x2F;015_alerts_registry.sql&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;--      an alert whose stored byte had no enum member. That does NOT fail&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;--      the INSERT — RowBinary writes the byte unvalidated — it fails on&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;--      READ, when the column is formatted (UNKNOWN_ELEMENT_OF_ENUM),&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;--      breaking SELECT * on the table with nothing logged at ingest.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Trace the observable state of the system. Batches are acknowledged. The
+alert counter climbs. No error is logged, anywhere, by anyone. The metrics
+dashboard is green. Every health check passes.&lt;&#x2F;p&gt;
+&lt;p&gt;And &lt;code&gt;SELECT * FROM edr.alerts&lt;&#x2F;code&gt; throws.&lt;&#x2F;p&gt;
+&lt;p&gt;The detection pipeline was “working” by every signal it emitted, and the
+alerts were unreadable. The gap between the operation failing and anyone
+finding out was bounded only by how long until someone looked at the table.
+In this case, seven schema versions.&lt;&#x2F;p&gt;
+&lt;p&gt;Two things are worth extracting.&lt;&#x2F;p&gt;
+&lt;p&gt;The first is about &lt;strong&gt;where validation lives&lt;&#x2F;strong&gt;. RowBinary is a schema-less
+binary format: values are written positionally with no names and no types on
+the wire. That’s what makes it fast, and the speed is real. But “no schema
+on the wire” means the receiver cannot check anything — it writes the bytes
+you gave it. The validation you &lt;em&gt;thought&lt;&#x2F;em&gt; the database was doing was never
+happening; you had simply never sent it anything invalid before.&lt;&#x2F;p&gt;
+&lt;p&gt;Fast serialization formats buy their speed by trusting the sender. The trust
+doesn’t remove the need for validation, it &lt;em&gt;relocates&lt;&#x2F;em&gt; it — and if you don’t
+consciously relocate it, it lands nowhere. Which is why the fix isn’t only
+the migration:&lt;&#x2F;p&gt;
+&lt;p&gt;Two unit tests now pin the alerts enum’s membership and the struct’s column
+order against the DDL file itself. The check moved into the build, because
+that’s the last place both sides of the contract are visible at once.&lt;&#x2F;p&gt;
+&lt;p&gt;The second extraction is subtler and rather beautiful:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;--      Extending the enum also HEALS rows already written that way: the&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;--      stored byte becomes a legal member again and reads back correctly,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;--      so no repair pass is needed after this runs.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;The old rows repair themselves. Because the byte was stored &lt;em&gt;faithfully&lt;&#x2F;em&gt; —
+ClickHouse wrote exactly what it was given — the data was never corrupt. It
+was &lt;strong&gt;uninterpretable&lt;&#x2F;strong&gt;, which is a different condition entirely. The value
+was right; the dictionary needed to read it was incomplete. Extend the
+dictionary and every historical row becomes readable.&lt;&#x2F;p&gt;
+&lt;p&gt;That distinction — &lt;em&gt;lossless but unreadable&lt;&#x2F;em&gt; versus &lt;em&gt;lossy&lt;&#x2F;em&gt; — is worth
+carrying around. Systems that store faithfully and interpret separately can
+recover from interpretation bugs. Systems that normalize on the way in
+cannot: they’ve thrown away the thing they’d need to fix it later. It’s the
+same instinct as &lt;a href=&quot;https:&#x2F;&#x2F;adasumizox.github.io&#x2F;posts&#x2F;03-naming-things-that-move&#x2F;&quot;&gt;essay 3&lt;&#x2F;a&gt;’s insistence that
+absence be representable. Preserve what you were given; decide what it means
+as late as you can.&lt;&#x2F;p&gt;
+&lt;p&gt;There’s a companion hazard right next to it, mentioned in the same file:
+RowBinary is &lt;em&gt;positional&lt;&#x2F;em&gt;, so the Rust struct’s field order and the DDL’s
+column order are a single contract split across two files in two languages.
+Get them out of step and every value shifts one column over — &lt;code&gt;severity&lt;&#x2F;code&gt;
+lands in &lt;code&gt;state&lt;&#x2F;code&gt;, &lt;code&gt;agent_id&lt;&#x2F;code&gt; lands in &lt;code&gt;sequence&lt;&#x2F;code&gt; — and again, nothing errors.
+Hence the comment on the struct:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; One edr.alerts row; field order matches the DDL exactly (RowBinary).&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;A comment is not enforcement, which is why there’s a test. But the pattern to
+notice is that &lt;strong&gt;implicit contracts need explicit tests&lt;&#x2F;strong&gt;, and the most
+dangerous contracts are the ones expressed as an agreement about &lt;em&gt;order&lt;&#x2F;em&gt;,
+because they fail silently and totally.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;retention-makes-you-denormalize&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#retention-makes-you-denormalize&quot; aria-label=&quot;Anchor link for: retention-makes-you-denormalize&quot;&gt;Retention makes you denormalize&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;One more modeling decision, driven by an unglamorous force:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- Context copied from the matched event at detection time, so triage&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- answers &amp;quot;what ran &#x2F; what was touched &#x2F; where did it connect&amp;quot;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- without a join and unaffected by the events TTL.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;An alert copies its context from the event that fired it. Normalization says
+don’t — store the reference, join when needed. The reason to break that rule
+is stated plainly in the migration: events live 30 days, alerts live 90, and
+an investigation routinely outlives its evidence.&lt;&#x2F;p&gt;
+&lt;p&gt;An alert that says “rule X fired on event &lt;code&gt;(agent, 4821, 3)&lt;&#x2F;code&gt;” is, on day 45,
+a pointer into a void. The join returns nothing. The alert is technically
+still there and practically worthless.&lt;&#x2F;p&gt;
+&lt;p&gt;Normalization implicitly assumes both sides of a relationship live the same
+length of time. When they don’t, a foreign key is a promise that expires.
+&lt;strong&gt;Different retention periods force denormalization&lt;&#x2F;strong&gt;, and the copy isn’t
+redundancy — it’s the only way the alert stays meaningful for its own
+lifetime.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;where-the-difficulty-actually-is&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#where-the-difficulty-actually-is&quot; aria-label=&quot;Anchor link for: where-the-difficulty-actually-is&quot;&gt;Where the difficulty actually is&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;None of the hard parts in this essay were about detection logic. The rules
+themselves are almost trivial — a few string comparisons ANDed together,
+matching persistence keys that have been documented for twenty years.&lt;&#x2F;p&gt;
+&lt;p&gt;The hard parts were: whether a rule can be expressed in the same language as
+a query; whether alert identity survives replay; which mechanism carries the
+guarantee and which is allowed to be sloppy; whether a comparison respects
+the semantics of the namespace it’s comparing in; whether a serialization
+format validates or merely stores; whether a foreign key outlives what it
+points to.&lt;&#x2F;p&gt;
+&lt;p&gt;Every one of those is data modeling. And every one of them can break a
+detection &lt;em&gt;without breaking anything visible&lt;&#x2F;em&gt; — which is the recurring theme
+of this whole series and the specific reason detection is unforgiving. A
+crashed system announces itself. A detection that stopped firing looks
+exactly like a quiet week.&lt;&#x2F;p&gt;
+&lt;p&gt;Which raises the next question. If silent failure is the enemy, and the code
+runs inside kernels on machines you’ll never touch, how do you ever know it
+works? The next essay tackles that problem.&lt;&#x2F;p&gt;
+</content>
+        
+    </entry>
+</feed>

@@ -1,0 +1,480 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en">
+    <title>Daniel&#x27;s Detection Notes - Detection Engineering</title>
+    <subtitle>Hands-on detection engineering notes by Daniel Jeczen: building EDR and SIEM labs, exploring Windows telemetry, and turning security events into useful detections.</subtitle>
+    <link rel="self" type="application/atom+xml" href="https://adasumizox.github.io/tags/detection-engineering/atom.xml"/>
+    <link rel="alternate" type="text/html" href="https://adasumizox.github.io"/>
+    <generator uri="https://www.getzola.org/">Zola</generator>
+    <updated>2026-09-17T00:00:00+00:00</updated>
+    <id>https://adasumizox.github.io/tags/detection-engineering/atom.xml</id>
+    <entry xml:lang="en">
+        <title>Detection Is a Data-Modeling Problem</title>
+        <published>2026-09-17T00:00:00+00:00</published>
+        <updated>2026-09-17T00:00:00+00:00</updated>
+        
+        <author>
+          <name>
+            
+              Unknown
+            
+          </name>
+        </author>
+        
+        <link rel="alternate" type="text/html" href="https://adasumizox.github.io/posts/07-detection-as-data-modeling/"/>
+        <id>https://adasumizox.github.io/posts/07-detection-as-data-modeling/</id>
+        
+        <content type="html" xml:base="https://adasumizox.github.io/posts/07-detection-as-data-modeling/">&lt;p&gt;&lt;em&gt;Building an EDR from scratch, essay 7 of 13.&lt;&#x2F;em&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;Detection engineering has a glamorous reputation. It’s the part with the
+attacker in it — behavioral analytics, threat hunting, the rule that catches
+the thing nobody else caught.&lt;&#x2F;p&gt;
+&lt;p&gt;Having now built a small one, my honest assessment is that the clever rules
+are the easy part, and they’re not where the failures live. The failures
+live in the data model underneath: whether a rule &lt;em&gt;can&lt;&#x2F;em&gt; express what you
+mean, whether it means the same thing tomorrow, and — the one that nearly
+got me — whether the system tells you when it has quietly stopped working.&lt;&#x2F;p&gt;
+&lt;p&gt;This essay is about that substrate.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;one-vocabulary-two-purposes&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#one-vocabulary-two-purposes&quot; aria-label=&quot;Anchor link for: one-vocabulary-two-purposes&quot;&gt;One vocabulary, two purposes&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;The first decision sounds like an implementation detail and turns out to
+shape everything. From &lt;code&gt;backend&#x2F;src&#x2F;detect.rs&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! Rules match the *normalized* EventRow (post-flatten), not raw proto:&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! field names in a rule are the ClickHouse column names, so a rule that&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! works in SQL works here and vice versa.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Rules could have matched against the protobuf message — it’s what arrives on
+the wire, and it’s the natural object in the code. Instead they match the
+flattened database row, using database column names.&lt;&#x2F;p&gt;
+&lt;p&gt;The reason is a workflow, not a technical constraint. Real detection
+engineering goes like this: an analyst is hunting, writing SQL against
+historical events, and finds something. A query returns rows that shouldn’t
+exist. Now they want that query to run continuously against new data.&lt;&#x2F;p&gt;
+&lt;p&gt;If rules speak a different language than queries, that transition is a
+translation step — and translation is where meaning quietly drifts. The
+analyst’s &lt;code&gt;WHERE reg_key LIKE &#x27;%\CurrentVersion\Run%&#x27;&lt;&#x2F;code&gt; becomes some
+&lt;code&gt;registry.key_path&lt;&#x2F;code&gt; field in a rule DSL, and the two are &lt;em&gt;almost&lt;&#x2F;em&gt; the same,
+and the difference surfaces six months later as an alert that never fired.&lt;&#x2F;p&gt;
+&lt;p&gt;When both speak the same names, promoting a hunt to a rule is copying a
+condition. And it works in reverse, which is just as valuable: given an
+alert, you can paste its condition into SQL and ask “how often did this
+happen last month?” The investigation and the detection are the same
+sentence in the same language.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;Make the exploratory tool and the production tool speak the same
+vocabulary.&lt;&#x2F;strong&gt; The friction you remove is conceptual, not typing.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;correctness-and-volume-are-different-problems&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#correctness-and-volume-are-different-problems&quot; aria-label=&quot;Anchor link for: correctness-and-volume-are-different-problems&quot;&gt;Correctness and volume are different problems&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;The second idea is a separation that I think a lot of systems get wrong by
+conflating.&lt;&#x2F;p&gt;
+&lt;p&gt;Two things sound similar: &lt;em&gt;don’t record the same alert twice&lt;&#x2F;em&gt; and &lt;em&gt;don’t
+spam the analyst&lt;&#x2F;em&gt;. They are unrelated problems, and this engine solves them
+with unrelated mechanisms — deliberately.&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! works in SQL works here and vice versa. Evaluation is pure — the same&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! rows always yield the same alerts — which is what makes replay safe:&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! an alert&amp;#39;s identity is (agent_id, sequence, event_index, rule_id), so&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! a replayed WAL batch re-derives byte-identical alert keys&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Alert identity is derived entirely from its inputs: which agent, which
+event, which rule. No timestamps of evaluation, no counters, no randomness.
+So when a WAL batch replays — which, per &lt;a href=&quot;https:&#x2F;&#x2F;adasumizox.github.io&#x2F;posts&#x2F;02-the-shape-of-a-pipeline&#x2F;&quot;&gt;essay 2&lt;&#x2F;a&gt;,
+is routine — the same alerts are re-derived with the same keys and collapse
+in the database exactly like the events do.&lt;&#x2F;p&gt;
+&lt;p&gt;This is the dedupe token idea from the pipeline, applied one plane up, and it
+works for the same reason: identity computed from content is stable under
+repetition. Purity isn’t an aesthetic preference here. It’s the property that
+makes replay safe, and any impurity — an evaluation timestamp in the key, say
+— would silently break it.&lt;&#x2F;p&gt;
+&lt;p&gt;Noise suppression is the other problem, and note how differently it’s
+treated:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! Noise suppression is separate from replay dedupe and deliberately&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! best-effort: an in-memory window per (rule_id, agent_id) that survives&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! neither restarts nor multi-instance deployments — the deterministic&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! alert key is what guarantees correctness, suppression only reduces&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! volume.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Suppression is explicitly allowed to be wrong. It lives in memory, dies on
+restart, and doesn’t coordinate across instances. If a backend restarts, you
+might see a duplicate alert you’d have preferred to suppress. Nobody’s
+correctness is violated; someone is mildly annoyed.&lt;&#x2F;p&gt;
+&lt;p&gt;That’s a completely legitimate place to be sloppy — &lt;em&gt;provided&lt;&#x2F;em&gt; you’re clear
+about which mechanism carries the guarantee. The failure I’ve seen in real
+systems is using the suppression cache as the deduplication mechanism, at
+which point a restart doesn’t produce a duplicate alert, it produces a
+&lt;strong&gt;missing&lt;&#x2F;strong&gt; one, and nobody notices because the alert that didn’t fire is
+invisible.&lt;&#x2F;p&gt;
+&lt;p&gt;Which leads directly to the subtlest line in the module:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! volume. The check&#x2F;commit split is load-bearing: evaluate() only READS&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! the window and commit() is called strictly after the alert insert&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! succeeded, so an alert whose insert failed is never remembered as&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;! &amp;quot;already fired&amp;quot; and lost on the retry.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Evaluation reads the suppression window. It does not update it. The update
+happens only after the alert has actually been written.&lt;&#x2F;p&gt;
+&lt;p&gt;Get that ordering backwards — mark it suppressed at evaluation time, then
+insert — and here’s your incident: the database write fails, the retry
+arrives, the suppression window says “already fired,” and the alert is
+dropped. It was never stored anywhere. The only trace is a metric counter
+that doesn’t match.&lt;&#x2F;p&gt;
+&lt;p&gt;The general rule is worth stating carefully because it’s violated everywhere:
+&lt;strong&gt;a record that says “I did X” must be written after X, never before.&lt;&#x2F;strong&gt; The
+window between attempt and confirmation is exactly where crashes and errors
+live, and a system that has already recorded success on entering that window
+cannot tell the difference between done and never-happened.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;knowing-what-your-data-means&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#knowing-what-your-data-means&quot; aria-label=&quot;Anchor link for: knowing-what-your-data-means&quot;&gt;Knowing what your data means&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Now my favorite rule-writing detail, because it isn’t about rules at all.
+From &lt;code&gt;backend&#x2F;rules&#x2F;README.md&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;plain&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;Every string condition here uses the ASCII-case-insensitive form&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;(`contains_i`, `eq_i`). The registry is a case-insensitive namespace, so&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;the case recorded in the event is the *writer&amp;#39;s* choice, not a fact about&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;the key: a value that does not already exist is stored with whatever case&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;created it. A case-sensitive `reg_value_name eq &amp;quot;Debugger&amp;quot;` would miss&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;`debugger` for free, which is not a detection worth shipping.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Sit with “the case recorded in the event is the writer’s choice, not a fact
+about the key.”&lt;&#x2F;p&gt;
+&lt;p&gt;The Windows registry is case-insensitive but case-&lt;em&gt;preserving&lt;&#x2F;em&gt;. Create a
+value named &lt;code&gt;debugger&lt;&#x2F;code&gt; and the registry stores it as &lt;code&gt;debugger&lt;&#x2F;code&gt; while
+treating it as identical to &lt;code&gt;Debugger&lt;&#x2F;code&gt; for every lookup. Windows will happily
+use it. Your telemetry faithfully records the lowercase form. And a rule
+matching &lt;code&gt;Debugger&lt;&#x2F;code&gt; exactly sees nothing.&lt;&#x2F;p&gt;
+&lt;p&gt;That’s not a bug in the sensor — the sensor reported precisely what
+happened. It’s a rule that mistook an &lt;em&gt;incidental encoding&lt;&#x2F;em&gt; for &lt;em&gt;semantic
+content&lt;&#x2F;em&gt;. And the bypass costs an attacker exactly one keystroke, with no
+tooling and no cleverness.&lt;&#x2F;p&gt;
+&lt;p&gt;You cannot find this class of bug by testing your rule, because your test
+will use the canonical casing, and it will pass. You find it by asking a
+question about the data itself: &lt;strong&gt;for this field, which parts of the value
+are meaningful and which are the writer’s arbitrary choice?&lt;&#x2F;strong&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;The same question, asked elsewhere, produces: paths on case-insensitive
+filesystems, domain names, HTTP headers, Unicode normalization forms,
+trailing dots on FQDNs, &lt;code&gt;&#x2F;tmp&lt;&#x2F;code&gt; versus &lt;code&gt;&#x2F;private&#x2F;tmp&lt;&#x2F;code&gt; on macOS. Every one is a
+place where two representations mean the same thing, and where a comparison
+that doesn’t know it becomes a free bypass.&lt;&#x2F;p&gt;
+&lt;p&gt;The packaged rule shows what this looks like in practice — note that &lt;em&gt;both&lt;&#x2F;em&gt;
+conditions use the &lt;code&gt;_i&lt;&#x2F;code&gt; form:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;json&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;  &amp;quot;where&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;: [&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;    {&lt;&#x2F;span&gt;&lt;span style=&quot;color: #72F1B8;&quot;&gt;&amp;quot;field&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;:&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;quot;reg_key&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #72F1B8;&quot;&gt; &amp;quot;op&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;:&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;quot;contains_i&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #72F1B8;&quot;&gt; &amp;quot;value&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;:&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;quot;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;\\&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;CurrentVersion&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;\\&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;Run&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;},&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;    {&lt;&#x2F;span&gt;&lt;span style=&quot;color: #72F1B8;&quot;&gt;&amp;quot;field&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;:&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;quot;reg_data&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #72F1B8;&quot;&gt; &amp;quot;op&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;:&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;quot;contains_i&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #72F1B8;&quot;&gt; &amp;quot;value&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;:&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;quot;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;\\&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;AppData&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;\\&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;}&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;  ],&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;The key path is case-insensitive because the registry is. But &lt;code&gt;reg_data&lt;&#x2F;code&gt; is
+a &lt;em&gt;filesystem path the attacker chose&lt;&#x2F;em&gt;, and &lt;code&gt;C:\Users\bob\appdata\roaming\x.exe&lt;&#x2F;code&gt;
+works perfectly well on Windows. Any field an adversary controls the encoding
+of needs the same treatment, for the same reason.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;when-healthy-is-a-lie&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#when-healthy-is-a-lie&quot; aria-label=&quot;Anchor link for: when-healthy-is-a-lie&quot;&gt;When healthy is a lie&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Now the story that reorganized how I think about validation, and it’s the
+reason this essay exists.&lt;&#x2F;p&gt;
+&lt;p&gt;The alerts table has an &lt;code&gt;event_type&lt;&#x2F;code&gt; column, an enum listing every event
+type an alert can be about. It was created with 11 types. Meanwhile the
+events table grew — module loads, process access, TCC, exec-maps, registry —
+to 23. The alerts enum never followed.&lt;&#x2F;p&gt;
+&lt;p&gt;So a rule matching on, say, &lt;code&gt;registry_value_set&lt;&#x2F;code&gt; produced an alert whose
+&lt;code&gt;event_type&lt;&#x2F;code&gt; byte had no corresponding enum member. Here’s what happened
+next, from &lt;code&gt;backend&#x2F;schema&#x2F;015_alerts_registry.sql&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;--      an alert whose stored byte had no enum member. That does NOT fail&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;--      the INSERT — RowBinary writes the byte unvalidated — it fails on&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;--      READ, when the column is formatted (UNKNOWN_ELEMENT_OF_ENUM),&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;--      breaking SELECT * on the table with nothing logged at ingest.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Trace the observable state of the system. Batches are acknowledged. The
+alert counter climbs. No error is logged, anywhere, by anyone. The metrics
+dashboard is green. Every health check passes.&lt;&#x2F;p&gt;
+&lt;p&gt;And &lt;code&gt;SELECT * FROM edr.alerts&lt;&#x2F;code&gt; throws.&lt;&#x2F;p&gt;
+&lt;p&gt;The detection pipeline was “working” by every signal it emitted, and the
+alerts were unreadable. The gap between the operation failing and anyone
+finding out was bounded only by how long until someone looked at the table.
+In this case, seven schema versions.&lt;&#x2F;p&gt;
+&lt;p&gt;Two things are worth extracting.&lt;&#x2F;p&gt;
+&lt;p&gt;The first is about &lt;strong&gt;where validation lives&lt;&#x2F;strong&gt;. RowBinary is a schema-less
+binary format: values are written positionally with no names and no types on
+the wire. That’s what makes it fast, and the speed is real. But “no schema
+on the wire” means the receiver cannot check anything — it writes the bytes
+you gave it. The validation you &lt;em&gt;thought&lt;&#x2F;em&gt; the database was doing was never
+happening; you had simply never sent it anything invalid before.&lt;&#x2F;p&gt;
+&lt;p&gt;Fast serialization formats buy their speed by trusting the sender. The trust
+doesn’t remove the need for validation, it &lt;em&gt;relocates&lt;&#x2F;em&gt; it — and if you don’t
+consciously relocate it, it lands nowhere. Which is why the fix isn’t only
+the migration:&lt;&#x2F;p&gt;
+&lt;p&gt;Two unit tests now pin the alerts enum’s membership and the struct’s column
+order against the DDL file itself. The check moved into the build, because
+that’s the last place both sides of the contract are visible at once.&lt;&#x2F;p&gt;
+&lt;p&gt;The second extraction is subtler and rather beautiful:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;--      Extending the enum also HEALS rows already written that way: the&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;--      stored byte becomes a legal member again and reads back correctly,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;--      so no repair pass is needed after this runs.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;The old rows repair themselves. Because the byte was stored &lt;em&gt;faithfully&lt;&#x2F;em&gt; —
+ClickHouse wrote exactly what it was given — the data was never corrupt. It
+was &lt;strong&gt;uninterpretable&lt;&#x2F;strong&gt;, which is a different condition entirely. The value
+was right; the dictionary needed to read it was incomplete. Extend the
+dictionary and every historical row becomes readable.&lt;&#x2F;p&gt;
+&lt;p&gt;That distinction — &lt;em&gt;lossless but unreadable&lt;&#x2F;em&gt; versus &lt;em&gt;lossy&lt;&#x2F;em&gt; — is worth
+carrying around. Systems that store faithfully and interpret separately can
+recover from interpretation bugs. Systems that normalize on the way in
+cannot: they’ve thrown away the thing they’d need to fix it later. It’s the
+same instinct as &lt;a href=&quot;https:&#x2F;&#x2F;adasumizox.github.io&#x2F;posts&#x2F;03-naming-things-that-move&#x2F;&quot;&gt;essay 3&lt;&#x2F;a&gt;’s insistence that
+absence be representable. Preserve what you were given; decide what it means
+as late as you can.&lt;&#x2F;p&gt;
+&lt;p&gt;There’s a companion hazard right next to it, mentioned in the same file:
+RowBinary is &lt;em&gt;positional&lt;&#x2F;em&gt;, so the Rust struct’s field order and the DDL’s
+column order are a single contract split across two files in two languages.
+Get them out of step and every value shifts one column over — &lt;code&gt;severity&lt;&#x2F;code&gt;
+lands in &lt;code&gt;state&lt;&#x2F;code&gt;, &lt;code&gt;agent_id&lt;&#x2F;code&gt; lands in &lt;code&gt;sequence&lt;&#x2F;code&gt; — and again, nothing errors.
+Hence the comment on the struct:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;rust&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F;&#x2F; One edr.alerts row; field order matches the DDL exactly (RowBinary).&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;A comment is not enforcement, which is why there’s a test. But the pattern to
+notice is that &lt;strong&gt;implicit contracts need explicit tests&lt;&#x2F;strong&gt;, and the most
+dangerous contracts are the ones expressed as an agreement about &lt;em&gt;order&lt;&#x2F;em&gt;,
+because they fail silently and totally.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;retention-makes-you-denormalize&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#retention-makes-you-denormalize&quot; aria-label=&quot;Anchor link for: retention-makes-you-denormalize&quot;&gt;Retention makes you denormalize&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;One more modeling decision, driven by an unglamorous force:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- Context copied from the matched event at detection time, so triage&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- answers &amp;quot;what ran &#x2F; what was touched &#x2F; where did it connect&amp;quot;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    -- without a join and unaffected by the events TTL.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;An alert copies its context from the event that fired it. Normalization says
+don’t — store the reference, join when needed. The reason to break that rule
+is stated plainly in the migration: events live 30 days, alerts live 90, and
+an investigation routinely outlives its evidence.&lt;&#x2F;p&gt;
+&lt;p&gt;An alert that says “rule X fired on event &lt;code&gt;(agent, 4821, 3)&lt;&#x2F;code&gt;” is, on day 45,
+a pointer into a void. The join returns nothing. The alert is technically
+still there and practically worthless.&lt;&#x2F;p&gt;
+&lt;p&gt;Normalization implicitly assumes both sides of a relationship live the same
+length of time. When they don’t, a foreign key is a promise that expires.
+&lt;strong&gt;Different retention periods force denormalization&lt;&#x2F;strong&gt;, and the copy isn’t
+redundancy — it’s the only way the alert stays meaningful for its own
+lifetime.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;where-the-difficulty-actually-is&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#where-the-difficulty-actually-is&quot; aria-label=&quot;Anchor link for: where-the-difficulty-actually-is&quot;&gt;Where the difficulty actually is&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;None of the hard parts in this essay were about detection logic. The rules
+themselves are almost trivial — a few string comparisons ANDed together,
+matching persistence keys that have been documented for twenty years.&lt;&#x2F;p&gt;
+&lt;p&gt;The hard parts were: whether a rule can be expressed in the same language as
+a query; whether alert identity survives replay; which mechanism carries the
+guarantee and which is allowed to be sloppy; whether a comparison respects
+the semantics of the namespace it’s comparing in; whether a serialization
+format validates or merely stores; whether a foreign key outlives what it
+points to.&lt;&#x2F;p&gt;
+&lt;p&gt;Every one of those is data modeling. And every one of them can break a
+detection &lt;em&gt;without breaking anything visible&lt;&#x2F;em&gt; — which is the recurring theme
+of this whole series and the specific reason detection is unforgiving. A
+crashed system announces itself. A detection that stopped firing looks
+exactly like a quiet week.&lt;&#x2F;p&gt;
+&lt;p&gt;Which raises the next question. If silent failure is the enemy, and the code
+runs inside kernels on machines you’ll never touch, how do you ever know it
+works? The next essay tackles that problem.&lt;&#x2F;p&gt;
+</content>
+        
+    </entry>
+    <entry xml:lang="en">
+        <title>What You Cannot See</title>
+        <published>2026-09-09T00:00:00+00:00</published>
+        <updated>2026-09-09T00:00:00+00:00</updated>
+        
+        <author>
+          <name>
+            
+              Unknown
+            
+          </name>
+        </author>
+        
+        <link rel="alternate" type="text/html" href="https://adasumizox.github.io/posts/06-what-you-cannot-see/"/>
+        <id>https://adasumizox.github.io/posts/06-what-you-cannot-see/</id>
+        
+        <content type="html" xml:base="https://adasumizox.github.io/posts/06-what-you-cannot-see/">&lt;p&gt;&lt;em&gt;Building an EDR from scratch, essay 6 of 13.&lt;&#x2F;em&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;Every sensor in this series watches an operating system abstraction.
+Process creation. File open. Socket connect. Module load. The events are
+delivered because the kernel maintains those abstractions and offers hooks
+where they’re maintained.&lt;&#x2F;p&gt;
+&lt;p&gt;Which implies something uncomfortable, and it’s the honest starting point
+for this essay: &lt;strong&gt;anything that accomplishes its goal without going through
+the abstraction you’re watching is invisible to you.&lt;&#x2F;strong&gt; Not hard to see. Not
+low-fidelity. Invisible, structurally, in a way no amount of tuning fixes.&lt;&#x2F;p&gt;
+&lt;p&gt;An attacker who understands your sensor’s hook points is not trying to
+evade your detection logic. They’re trying to accomplish their goal via a
+path that never touches your hook. That’s a completely different game, and
+it’s why the interesting question for a telemetry system isn’t “what does
+it catch” but “what is it &lt;em&gt;incapable&lt;&#x2F;em&gt; of catching, and do we know?”&lt;&#x2F;p&gt;
+&lt;p&gt;This essay is about the boundary. It ends up being a lesson in
+epistemology more than in kernels.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;when-the-obvious-field-lies-to-you&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#when-the-obvious-field-lies-to-you&quot; aria-label=&quot;Anchor link for: when-the-obvious-field-lies-to-you&quot;&gt;When the obvious field lies to you&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Start with something that looks like solid ground. A process starts, and
+you record the path of the executable. Every EDR does this; most detection
+logic is built on it.&lt;&#x2F;p&gt;
+&lt;p&gt;Then consider &lt;code&gt;memfd_create&lt;&#x2F;code&gt;. It gives you a file descriptor backed by
+anonymous memory — a “file” that exists only in RAM, with no directory
+entry anywhere on disk. You can write an ELF binary into it and &lt;code&gt;execve&lt;&#x2F;code&gt; it.
+The process runs. Nothing was ever written to the filesystem.&lt;&#x2F;p&gt;
+&lt;p&gt;What does your sensor report for the image path? Something like
+&lt;code&gt;&#x2F;dev&#x2F;fd&#x2F;3&lt;&#x2F;code&gt;. That’s not a lie exactly, but it’s useless: it’s a synthetic
+path naming a file descriptor in a process that is about to be replaced. It
+tells you nothing about what ran. Your hash of the image can’t be computed
+from it. Your allowlist can’t match it. Your analyst sees a path that
+resolves to nothing.&lt;&#x2F;p&gt;
+&lt;p&gt;The field is present, well-formed, and empty of meaning. Those are the worst
+kind of blind spot, because a null would at least announce itself.&lt;&#x2F;p&gt;
+&lt;p&gt;The fix, from &lt;code&gt;linux&#x2F;bpf&#x2F;edr_probes.bpf.c&lt;&#x2F;code&gt;,
+is to stop asking the path and start asking the inode:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;c&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;		if&lt;&#x2F;span&gt;&lt;span&gt; (&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;BPF_CORE_READ&lt;&#x2F;span&gt;&lt;span&gt;(file, f_inode, i_nlink)&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; ==&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; 0&lt;&#x2F;span&gt;&lt;span&gt;)&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;			ev&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;-&amp;gt;&lt;&#x2F;span&gt;&lt;span&gt;exec_flags &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;|=&lt;&#x2F;span&gt;&lt;span&gt; EDR_LX_EXEC_UNLINKED;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;&lt;code&gt;i_nlink&lt;&#x2F;code&gt; is the number of directory entries pointing at this inode. Zero
+means &lt;em&gt;nothing on the filesystem names this file&lt;&#x2F;em&gt;. It might be a memfd. It
+might be a normal binary that was unlinked after being opened — the classic
+“drop, execute, delete” that leaves a running process with no file behind
+it. Either way, one integer answers a question the path could not: is this
+executable reachable by name?&lt;&#x2F;p&gt;
+&lt;p&gt;A second read distinguishes the specific case:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;c&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;		if&lt;&#x2F;span&gt;&lt;span&gt; (dn &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;&amp;amp;&amp;amp;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;		    bpf_probe_read_kernel&lt;&#x2F;span&gt;&lt;span&gt;(dname,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; sizeof&lt;&#x2F;span&gt;&lt;span&gt;(dname), dn)&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; ==&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; 0&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; &amp;amp;&amp;amp;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FF7EDB;&quot;&gt;		    dname&lt;&#x2F;span&gt;&lt;span&gt;[&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt;0&lt;&#x2F;span&gt;&lt;span&gt;]&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; ==&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;#39;m&amp;#39;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; &amp;amp;&amp;amp;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;&quot;&gt; dname&lt;&#x2F;span&gt;&lt;span&gt;[&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt;1&lt;&#x2F;span&gt;&lt;span&gt;]&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; ==&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;#39;e&amp;#39;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; &amp;amp;&amp;amp;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;&quot;&gt; dname&lt;&#x2F;span&gt;&lt;span&gt;[&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt;2&lt;&#x2F;span&gt;&lt;span&gt;]&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; ==&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;#39;m&amp;#39;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; &amp;amp;&amp;amp;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FF7EDB;&quot;&gt;		    dname&lt;&#x2F;span&gt;&lt;span&gt;[&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt;3&lt;&#x2F;span&gt;&lt;span&gt;]&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; ==&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;#39;f&amp;#39;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; &amp;amp;&amp;amp;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;&quot;&gt; dname&lt;&#x2F;span&gt;&lt;span&gt;[&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt;4&lt;&#x2F;span&gt;&lt;span&gt;]&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; ==&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;#39;d&amp;#39;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; &amp;amp;&amp;amp;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;&quot;&gt; dname&lt;&#x2F;span&gt;&lt;span&gt;[&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt;5&lt;&#x2F;span&gt;&lt;span&gt;]&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; ==&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;#39;:&amp;#39;&lt;&#x2F;span&gt;&lt;span&gt;)&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;			ev&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;-&amp;gt;&lt;&#x2F;span&gt;&lt;span&gt;exec_flags &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;|=&lt;&#x2F;span&gt;&lt;span&gt; EDR_LX_EXEC_MEMFD &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;|&lt;&#x2F;span&gt;&lt;span&gt; EDR_LX_EXEC_UNLINKED;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;That’s a manually unrolled six-character string comparison, which looks
+absurd next to &lt;code&gt;strncmp&lt;&#x2F;code&gt; until you remember it’s running under the eBPF
+verifier, where a fixed-size read at a constant offset is provable and a
+variable-length loop is an argument. The comment says exactly that: “A short
+fixed read keeps the verifier out of variable-offset territory.”&lt;&#x2F;p&gt;
+&lt;p&gt;But the technique is what I want to underline. The path was unreliable, so
+the probe moved &lt;em&gt;closer to the mechanism&lt;&#x2F;em&gt; — from a rendered string to the
+kernel structure the string was rendered from. Sensor design is full of
+this. When the convenient field is derived, ask what it’s derived from, and
+whether the source is harder to lie about.&lt;&#x2F;p&gt;
+&lt;p&gt;Two boolean flags, and a class of execution that used to be indistinguishable
+from a normal process start becomes a query you can write. The attacker’s
+goal was to run code without leaving a file. They achieved it. They just
+couldn’t do it without producing an inode with zero links, which is the one
+thing the technique fundamentally requires.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;Look for what the technique cannot avoid.&lt;&#x2F;strong&gt; Anything else is a signature,
+and signatures get bypassed.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;absence-as-a-signal&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#absence-as-a-signal&quot; aria-label=&quot;Anchor link for: absence-as-a-signal&quot;&gt;Absence as a signal&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;There’s a stranger version of this, and it’s my favorite piece of design in
+the whole codebase.&lt;&#x2F;p&gt;
+&lt;p&gt;Loading a kernel module is the rootkit’s move — it’s the transition from
+“code running on the machine” to “code &lt;em&gt;inside&lt;&#x2F;em&gt; the machine.” Linux offers
+two syscalls for it. &lt;code&gt;finit_module&lt;&#x2F;code&gt; takes a file descriptor. &lt;code&gt;init_module&lt;&#x2F;code&gt;
+takes a memory buffer.&lt;&#x2F;p&gt;
+&lt;p&gt;The file-based path is straightforward to instrument, and the probe grabs
+the name:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;c&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;	dn &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt; BPF_CORE_READ&lt;&#x2F;span&gt;&lt;span&gt;(file, f_path.dentry, d_name.name);&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;	n &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt; bpf_probe_read_kernel_str&lt;&#x2F;span&gt;&lt;span&gt;(ev&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;-&amp;gt;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;font-style: italic;&quot;&gt;name&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; sizeof&lt;&#x2F;span&gt;&lt;span&gt;(ev&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;-&amp;gt;&lt;&#x2F;span&gt;&lt;span&gt;name), dn);&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;The memory-based path has no file at all, and therefore nothing to name:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;c&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;* init_module: the module image is a user buffer — no file, so no name.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt; * The absence IS the signal (a fileless kernel-module load). *&#x2F;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;That comment is doing real philosophical work. There is no name to report,
+and rather than treating that as a data-quality problem to paper over, the
+design treats &lt;em&gt;the shape of the missing data&lt;&#x2F;em&gt; as the finding. An event that
+says “a kernel module was loaded and I cannot tell you from where” is not
+a degraded event. It is a high-signal one, because the legitimate path —
+&lt;code&gt;modprobe&lt;&#x2F;code&gt;, &lt;code&gt;insmod&lt;&#x2F;code&gt;, the distro’s own tooling — uses the file-based
+syscall. The nameless variant is the interesting one almost by definition.&lt;&#x2F;p&gt;
+&lt;p&gt;There’s an even neater trick layered on top, which relies on &lt;em&gt;ordering&lt;&#x2F;em&gt;
+rather than content. The attempt hooks fire when a load is requested; a
+separate tracepoint fires when a module is actually accepted. So an attempt
+with no matching acceptance means the kernel refused the load — a signature
+check failing, lockdown mode engaging, a malformed module.&lt;&#x2F;p&gt;
+&lt;p&gt;Nobody emits a “module load refused” event. That fact is constructed by
+noticing that a thing which should have followed didn’t.&lt;&#x2F;p&gt;
+&lt;p&gt;The general move: &lt;strong&gt;you can detect an event by observing the hole where its
+consequence should be.&lt;&#x2F;strong&gt; It requires knowing the normal causal chain well
+enough to notice a missing link, which is a much deeper form of
+instrumentation than pattern-matching on fields. Missed connections. Absent
+heartbeats. Requests without responses. Once you start looking for holes,
+they’re everywhere, and they’re often where the interesting things hide.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;choosing-your-blindness&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#choosing-your-blindness&quot; aria-label=&quot;Anchor link for: choosing-your-blindness&quot;&gt;Choosing your blindness&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Now the uncomfortable kind of blind spot: the one you build yourself,
+knowingly, because the alternative is worse.&lt;&#x2F;p&gt;
+&lt;p&gt;Watching executable memory mappings would be a superb detection surface. A
+DLL being mapped into a process is how sideloading works, how injection
+works, how a malicious plugin gets in. So: report every file mapped
+executable.&lt;&#x2F;p&gt;
+&lt;p&gt;Try it and the sensor dies. Every process launch maps dozens of system
+libraries — 30 to 100 DLLs on Windows, dyld’s whole flood on macOS. The
+event rate is orders of magnitude above anything interesting, the ring
+buffer overflows, and you lose events &lt;em&gt;including the ones you cared about&lt;&#x2F;em&gt;.
+A firehose of noise doesn’t just bury the signal; it evicts it.&lt;&#x2F;p&gt;
+&lt;p&gt;So you filter. And here’s the thing worth sitting with: &lt;strong&gt;filtering is
+deliberately choosing what to be blind to.&lt;&#x2F;strong&gt; The filter isn’t a performance
+detail, it’s a coverage decision with a security consequence, and it should
+be argued rather than tuned into place.&lt;&#x2F;p&gt;
+&lt;p&gt;The story of choosing this particular filter is recorded in the
+&lt;code&gt;README&lt;&#x2F;code&gt;, and it’s a good one because the elegant idea lost:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;plain&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;a pure W^X filter was tried first and rejected — `max_protection` is `RWX`&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;for nearly every mapping on recent macOS, and a *current* RWX mapping is&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;hardware-blocked on Apple Silicon&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;The elegant idea was W^X: report mappings that are both writable and
+executable, since legitimate code is generally one or the other. Principled,
+mechanism-based, exactly the kind of filter this essay has been praising.&lt;&#x2F;p&gt;
+&lt;p&gt;It doesn’t work, for two independent reasons that only reality could have
+supplied. &lt;code&gt;max_protection&lt;&#x2F;code&gt; — the &lt;em&gt;maximum&lt;&#x2F;em&gt; protection a mapping could ever
+be granted — is RWX for almost everything on modern macOS, so the field
+doesn’t discriminate. And &lt;em&gt;current&lt;&#x2F;em&gt; RWX is hardware-blocked on Apple
+Silicon, so the thing you’d actually want to catch can’t exist in that form
+anyway. The theory was clean and the platform simply doesn’t behave the way
+the theory assumed.&lt;&#x2F;p&gt;
+&lt;p&gt;What shipped instead is a crude path exclusion: skip &lt;code&gt;&#x2F;System&lt;&#x2F;code&gt; and &lt;code&gt;&#x2F;usr&lt;&#x2F;code&gt; on
+macOS, skip the Windows directory on Windows. It’s an inelegant heuristic
+and everyone involved knows it. The README says so plainly — Apple’s own
+developer tooling reports as a non-system code load, and on Windows every
+application’s own DLLs under &lt;code&gt;Program Files&lt;&#x2F;code&gt; report too.&lt;&#x2F;p&gt;
+&lt;p&gt;But it’s honest about its own nature, it’s cheap enough to run in kernel
+context, and it reduces the volume enough that the interesting events
+survive. Sometimes the crude filter that works beats the beautiful one that
+doesn’t, and the professional skill is noticing which situation you’re in.&lt;&#x2F;p&gt;
+&lt;p&gt;One structural point, easy to miss and load-bearing: this filtering happens
+&lt;strong&gt;in the kernel&lt;&#x2F;strong&gt;, before the event is written to the ring. Filtering in
+user space would move the drop counter, not the load. The kernel would still
+produce the events, the ring would still overflow, and you’d still lose data
+— you’d just discard it after paying for it. A high-volume callback needs its
+filter at the source.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;the-floor&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#the-floor&quot; aria-label=&quot;Anchor link for: the-floor&quot;&gt;The floor&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;And finally, the blind spot with no clever workaround. From the README’s
+limitations:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;plain&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;**Manually mapped (&amp;quot;reflective&amp;quot;) images are invisible** on Windows: a DLL&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;written into memory and relocated by hand creates no image section, so no&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;load-image notification is ever delivered.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Reflective DLL loading works by doing the loader’s job yourself. Allocate
+memory, copy in the PE, walk the relocation table, resolve imports, jump to
+the entry point. The result is functioning code in a process — and the
+operating system’s loader was never involved, so there is no image section,
+so &lt;code&gt;PsSetLoadImageNotifyRoutine&lt;&#x2F;code&gt; has nothing to notify about. The hook isn’t
+failing. The event genuinely does not exist.&lt;&#x2F;p&gt;
+&lt;p&gt;macOS has the identical hole from the other direction: &lt;code&gt;MAP_ANON&lt;&#x2F;code&gt; memory
+with shellcode in it is anonymous, file-backed by nothing, and there is no
+“file mapped executable” event to deliver.&lt;&#x2F;p&gt;
+&lt;p&gt;The README’s framing is the right one:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;plain&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;in both cases the sensor sees code loads that pass through the OS loader,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;not code that bypasses it.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;That single sentence defines the sensor’s epistemic boundary better than any
+feature list could. You are not watching “code execution.” You are watching
+&lt;em&gt;the operating system’s code-loading machinery&lt;&#x2F;em&gt;, and the difference is
+exactly the set of techniques that skip it.&lt;&#x2F;p&gt;
+&lt;p&gt;Knowing the boundary changes what you do about it. You stop trying to make
+the file-mapping sensor catch reflective loading — it cannot, ever — and you
+start looking for the &lt;em&gt;consequences&lt;&#x2F;em&gt; an in-memory payload can’t avoid: the
+network connection it eventually makes, the process it injects into, the
+persistence it establishes, the child it spawns. The technique evades one
+sensor. It rarely evades the whole system, because it still has to
+accomplish something, and accomplishing things means using abstractions.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;why-writing-them-down-is-the-actual-skill&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#why-writing-them-down-is-the-actual-skill&quot; aria-label=&quot;Anchor link for: why-writing-them-down-is-the-actual-skill&quot;&gt;Why writing them down is the actual skill&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;The &lt;code&gt;README&lt;&#x2F;code&gt; has a “Known limitations” section that runs for
+over a hundred lines. Memory-mapped writes attributed at mapping time rather
+than at write time. Linux MODIFY firing on open-intent rather than first
+write. DNS invisible on macOS loopback because content filters never see it.
+TCC events that need an entitlement the build doesn’t have. Windows UDPv6
+decoded from documentation but never ground-truthed against a real capture.&lt;&#x2F;p&gt;
+&lt;p&gt;That list is, I’d argue, the most valuable artifact in the repository, and
+it’s worth being explicit about why.&lt;&#x2F;p&gt;
+&lt;p&gt;An analyst investigating an incident is constantly making inferences from
+absence. “There’s no network connection from that process, so it never
+called home.” “There’s no file write, so nothing was dropped.” Those
+inferences are only valid if the sensor would have seen it. Absence of
+evidence is evidence of absence &lt;em&gt;only&lt;&#x2F;em&gt; when you have coverage — and the
+limitations list is precisely the document that tells you when you don’t.&lt;&#x2F;p&gt;
+&lt;p&gt;This is the same principle as the counted ring drops from
+&lt;a href=&quot;https:&#x2F;&#x2F;adasumizox.github.io&#x2F;posts&#x2F;02-the-shape-of-a-pipeline&#x2F;&quot;&gt;essay 2&lt;&#x2F;a&gt;, one level up. There, the pipeline
+made data loss &lt;em&gt;known&lt;&#x2F;em&gt; rather than silent. Here, the documentation makes
+coverage gaps known rather than implied. In both cases the underlying value
+is the same: a system that tells you what it doesn’t know is trustworthy in
+a way that a system implying total coverage never is.&lt;&#x2F;p&gt;
+&lt;p&gt;And there’s a professional dimension. Vendors are structurally incentivized
+to describe coverage and stay quiet about gaps, because gaps read as
+weakness in a bake-off. The result is a market full of tools whose users
+systematically overestimate what they can conclude from silence. Writing the
+gaps down, next to the code that causes them, is the opposite bet: it makes
+the tool less impressive and considerably more useful.&lt;&#x2F;p&gt;
+&lt;p&gt;Which sets up the next question. Given a stream of events with known
+coverage and known holes, how do you actually turn it into a claim that
+something bad is happening? That turns out to be much less about clever
+rules than about the shape of the data underneath them. That data model is
+the subject of the next essay.&lt;&#x2F;p&gt;
+</content>
+        
+    </entry>
+</feed>

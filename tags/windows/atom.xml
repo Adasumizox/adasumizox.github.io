@@ -1,0 +1,398 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en">
+    <title>Daniel&#x27;s Detection Notes - Windows</title>
+    <subtitle>Hands-on detection engineering notes by Daniel Jeczen: building EDR and SIEM labs, exploring Windows telemetry, and turning security events into useful detections.</subtitle>
+    <link rel="self" type="application/atom+xml" href="https://adasumizox.github.io/tags/windows/atom.xml"/>
+    <link rel="alternate" type="text/html" href="https://adasumizox.github.io"/>
+    <generator uri="https://www.getzola.org/">Zola</generator>
+    <updated>2026-08-05T00:00:00+00:00</updated>
+    <id>https://adasumizox.github.io/tags/windows/atom.xml</id>
+    <entry xml:lang="en">
+        <title>How an Operating System Decides to Let You Watch It</title>
+        <published>2026-08-05T00:00:00+00:00</published>
+        <updated>2026-08-05T00:00:00+00:00</updated>
+        
+        <author>
+          <name>
+            
+              Unknown
+            
+          </name>
+        </author>
+        
+        <link rel="alternate" type="text/html" href="https://adasumizox.github.io/posts/01-how-an-os-lets-you-watch-it/"/>
+        <id>https://adasumizox.github.io/posts/01-how-an-os-lets-you-watch-it/</id>
+        
+        <content type="html" xml:base="https://adasumizox.github.io/posts/01-how-an-os-lets-you-watch-it/">&lt;p&gt;&lt;em&gt;Building an EDR from scratch, essay 1 of 13.&lt;&#x2F;em&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;Here is an awkward fact about endpoint security software: the program you
+want to install and the program you want to catch are asking the operating
+system for the same things.&lt;&#x2F;p&gt;
+&lt;p&gt;Both want to see every process that starts. Both want to know when files
+are written. Both want to watch the network. Both want to survive reboots,
+resist termination, and run before the user logs in. If you squint at the
+capability list of an EDR agent and the capability list of a competent
+rootkit, they are the same list. The difference is intent, and intent is
+not something a kernel can typecheck.&lt;&#x2F;p&gt;
+&lt;p&gt;So every operating system has had to answer a question that has no clean
+technical answer: &lt;em&gt;how do we let someone watch everything, without letting
+everyone watch everything?&lt;&#x2F;em&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;Windows, Linux, and macOS each answered it differently. Not slightly
+differently — differently in kind, from different first principles, with
+different ideas about where trust comes from. And because the answer is a
+trust model rather than an API, it propagates upward. It shapes what your
+sensor can observe, what it costs to be wrong, and — this is the part I
+did not expect — &lt;em&gt;when in the software lifecycle your mistakes become
+visible&lt;&#x2F;em&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;That last one turned out to be the most useful lens I found. Let me get
+there the long way.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;three-answers-to-one-question&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#three-answers-to-one-question&quot; aria-label=&quot;Anchor link for: three-answers-to-one-question&quot;&gt;Three answers to one question&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;I’ll name the three models before defending them, because having the words
+makes the rest of this readable:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Windows trusts by ceremony.&lt;&#x2F;strong&gt; You may enter the kernel. First, perform
+the rituals.&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;strong&gt;Linux trusts by proof.&lt;&#x2F;strong&gt; You may not be trusted, so submit your program
+for mechanical verification and it will run only if safety is provable.&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;strong&gt;macOS trusts by brokerage.&lt;&#x2F;strong&gt; You may not enter the kernel at all.
+Apple will go inside, look around, and tell you what it saw.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;Each is internally coherent. Each is, I think, defensible. And each one
+extracts a completely different tax.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;windows-the-bet-on-ceremony&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#windows-the-bet-on-ceremony&quot; aria-label=&quot;Anchor link for: windows-the-bet-on-ceremony&quot;&gt;Windows: the bet on ceremony&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;The Windows model is the oldest and the most straightforward: security
+software runs in the kernel, with the same privileges as the kernel,
+because that is where the information is. There is no sandbox. If your
+driver dereferences a bad pointer at &lt;code&gt;DISPATCH_LEVEL&lt;&#x2F;code&gt;, the machine
+bugchecks, and every user of that machine finds out at once.&lt;&#x2F;p&gt;
+&lt;p&gt;Given that, Windows does not try to make your code safe. It tries to make
+sure that only code someone was willing to &lt;em&gt;sign their name to&lt;&#x2F;em&gt; gets to be
+unsafe. Trust is established out of band — a signing certificate, an
+attestation process, a company with a legal identity — and enforced at load
+time.&lt;&#x2F;p&gt;
+&lt;p&gt;What I find architecturally interesting is how thoroughly that ceremony is
+woven into the APIs themselves. It isn’t a single check at the door. The
+privileged APIs individually refuse to work for a driver that hasn’t
+performed the ritual. From the header comment in
+&lt;code&gt;windows&#x2F;driver&#x2F;edr_driver.c&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;c&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; *&lt;&#x2F;span&gt;&lt;span&gt; MUST be linked &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;&#x2F;&lt;&#x2F;span&gt;&lt;span&gt;INTEGRITYCHECK or PsSetCreateProcessNotifyRoutineEx&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; *&lt;&#x2F;span&gt;&lt;span&gt; fails with &lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;STATUS_ACCESS_DENIED&lt;&#x2F;span&gt;&lt;span&gt; (&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt;0xC0000022&lt;&#x2F;span&gt;&lt;span&gt;).&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;&lt;code&gt;&#x2F;INTEGRITYCHECK&lt;&#x2F;code&gt; is a flag that marks the image as requiring signature
+verification at load. Note what’s happening: the process-notification API
+won’t talk to you unless your binary has &lt;em&gt;asked to be held to a stricter
+standard&lt;&#x2F;em&gt;. It’s an opt-in that gates a capability. You can’t accidentally
+get process-creation visibility; you have to declare, in your link line,
+that you intend to be the kind of code that is checked.&lt;&#x2F;p&gt;
+&lt;p&gt;The other half of the Windows model is stranger and more human. Filesystem
+minifilters — the mechanism for seeing file operations — stack in an order
+determined by a number called an &lt;strong&gt;altitude&lt;&#x2F;strong&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;plain&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt; *   reg add HKLM\SYSTEM\CurrentControlSet\Services\&amp;lt;svc&amp;gt;\Instances\EdrAgentInstance&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt; *       &#x2F;v Altitude &#x2F;t REG_SZ &#x2F;d 385100 &#x2F;f&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt; * (385100 sits in the FSFilter Activity Monitor range 360000-389999;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Think about what an altitude actually is. Every filter driver on the system
+sits at a point in a global, numeric, totally-ordered namespace. Antivirus
+lives around 320000. Activity monitors live in 360000–389999. Encryption
+drivers live lower, so they see plaintext. Replication drivers live higher.
+Your position determines whether you observe a write before or after some
+other vendor’s product transforms it — which means it determines whether
+your product &lt;em&gt;works&lt;&#x2F;em&gt; in the presence of theirs.&lt;&#x2F;p&gt;
+&lt;p&gt;And the allocation of these numbers is not enforced by the kernel. It is
+administered by Microsoft, by request, as a registry of reserved ranges.
+It’s a social protocol wearing a &lt;code&gt;REG_SZ&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;I love this as a design artifact, because it’s an honest admission that the
+hard problem in kernel-mode security software was never memory safety — it
+was &lt;em&gt;coordination between mutually distrustful vendors who all want to be
+first&lt;&#x2F;em&gt;. Windows solved it with a phone book. My driver uses 385100 because
+it’s in the right neighborhood and nobody else on my lab machine is home;
+a shipping product would have that number assigned to it, in writing.&lt;&#x2F;p&gt;
+&lt;p&gt;The payoff for all this ceremony is that Windows gives you the sharpest
+semantics of the three platforms. When &lt;code&gt;PsSetCreateProcessNotifyRoutineEx&lt;&#x2F;code&gt;
+fires, you are inside process creation, holding structures the kernel is
+using, before the first instruction of the new image runs. Nothing is
+inferred. Nothing is a heuristic. You are standing in the room where it
+happens.&lt;&#x2F;p&gt;
+&lt;p&gt;The tax is that the room has no railings.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;linux-the-bet-on-proof&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#linux-the-bet-on-proof&quot; aria-label=&quot;Anchor link for: linux-the-bet-on-proof&quot;&gt;Linux: the bet on proof&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Linux, arriving at the same problem two decades later and with a very
+different culture, made close to the opposite bet. Rather than deciding
+&lt;em&gt;who&lt;&#x2F;em&gt; may run unsafe code in the kernel, it asked whether the code could be
+made safe enough that the question doesn’t matter.&lt;&#x2F;p&gt;
+&lt;p&gt;eBPF is the answer, and the verifier is the mechanism. You submit a program
+in a restricted instruction set; a static analyzer in the kernel simulates
+every reachable path and refuses to load anything it can’t prove terminates,
+stays in bounds, and touches only what it’s allowed to touch. If the proof
+succeeds, the program is JIT-compiled and runs at native speed in kernel
+context. If it fails, you get a rejection and a stack trace, and nothing
+happens to the machine.&lt;&#x2F;p&gt;
+&lt;p&gt;This inverts the cost structure completely. On Windows, the cost of a
+mistake is paid at runtime, by the customer, as a blue screen. On Linux,
+it’s paid at development time, by me, as an argument with a program that
+cannot be talked out of its position.&lt;&#x2F;p&gt;
+&lt;p&gt;What makes this more than a sandbox story is where the verifier’s
+constraints show up in the &lt;em&gt;design&lt;&#x2F;em&gt; of the sensor. Consider a snippet from
+the exec probe in
+&lt;code&gt;linux&#x2F;bpf&#x2F;edr_probes.bpf.c&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;c&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;	&#x2F;* Stack copies: key&#x2F;value pointers into the ringbuf reservation are&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;	 * a verifier gamble across kernels; the stack is always legal. *&#x2F;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;	pid &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span&gt; ev&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;-&amp;gt;&lt;&#x2F;span&gt;&lt;span&gt;pid;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;	ppid &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span&gt; ev&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;-&amp;gt;&lt;&#x2F;span&gt;&lt;span&gt;ppid;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;	bpf_map_update_elem&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;&amp;amp;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;font-style: italic;&quot;&gt;exec_ppid&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; &amp;amp;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;font-style: italic;&quot;&gt;pid&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; &amp;amp;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;font-style: italic;&quot;&gt;ppid&lt;&#x2F;span&gt;&lt;span&gt;, BPF_ANY);&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;There is a perfectly good copy of &lt;code&gt;pid&lt;&#x2F;code&gt; sitting in the ring buffer
+reservation two lines up. Copying it to the stack first is redundant work
+in any normal program. But whether the verifier accepts a pointer into a
+ring-buffer reservation as a map key varies across kernel versions, and a
+program that loads on my laptop and is rejected on a customer’s 5.10 kernel
+is a support incident, not a bug report. So the code carries an extra
+assignment forever, as a compatibility hedge.&lt;&#x2F;p&gt;
+&lt;p&gt;That’s the real shape of eBPF development. You are not writing C for a
+machine; you are writing C for a proof checker whose exact reasoning powers
+differ between the kernels your program must run on. The verifier is a
+compiler audience with opinions.&lt;&#x2F;p&gt;
+&lt;p&gt;The second half of the Linux answer addresses a different problem, and it’s
+one Windows never had to solve. Kernel data structures on Linux are not a
+stable ABI. &lt;code&gt;struct task_struct&lt;&#x2F;code&gt; is laid out differently in every kernel
+build, sometimes differently between two distributions of the same version.
+A sensor that reads &lt;code&gt;task-&amp;gt;start_boottime&lt;&#x2F;code&gt; at a hardcoded offset is
+correct exactly once.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;CO-RE&lt;&#x2F;strong&gt; — Compile Once, Run Everywhere — fixes this by shipping type
+information with the kernel (BTF) and having the loader relocate every
+field access at load time against the layout the running kernel actually
+has. &lt;code&gt;BPF_CORE_READ(bprm, filename)&lt;&#x2F;code&gt; compiles to a relocation entry, not
+an offset. The kernel tells you where &lt;code&gt;filename&lt;&#x2F;code&gt; lives on &lt;em&gt;this&lt;&#x2F;em&gt; machine,
+today.&lt;&#x2F;p&gt;
+&lt;p&gt;Step back and notice what those two mechanisms together represent. The
+verifier says: &lt;em&gt;I don’t trust your code, so prove it.&lt;&#x2F;em&gt; CO-RE says: &lt;em&gt;I don’t
+trust your assumptions about me, so ask at runtime.&lt;&#x2F;em&gt; Linux replaced the
+vendor-trust relationship with a pair of machine-checked contracts. That’s
+a genuinely different theory of how to make a kernel extensible, and it
+puts the burden on the extension author rather than on a certificate
+authority.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;macos-the-bet-on-brokerage&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#macos-the-bet-on-brokerage&quot; aria-label=&quot;Anchor link for: macos-the-bet-on-brokerage&quot;&gt;macOS: the bet on brokerage&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Apple looked at kernel extensions and concluded the entire category was a
+mistake.&lt;&#x2F;p&gt;
+&lt;p&gt;Not “risky.” Not “in need of better tooling.” A mistake — third-party code
+in the kernel was a permanent, unfixable source of instability and
+compromise, and the right move was to remove the capability from the
+platform. Kexts were deprecated, then walled off behind boot-policy changes
+that a normal user will never make.&lt;&#x2F;p&gt;
+&lt;p&gt;But security software still needs the data. So Apple built
+&lt;strong&gt;Endpoint Security&lt;&#x2F;strong&gt;: Apple’s own code sits at the kernel hook points, and
+your agent — running in &lt;em&gt;user space&lt;&#x2F;em&gt;, as an ordinary process — subscribes to
+a stream of events over a framework API. You get the semantics of kernel
+instrumentation with the failure domain of a user process. If your ES
+client segfaults, your ES client segfaults. The machine keeps running.&lt;&#x2F;p&gt;
+&lt;p&gt;Here’s the subscription from the shim in
+&lt;code&gt;macos&#x2F;esf&#x2F;edr_esf_shim.c&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;c&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FE4450;&quot;&gt;    es_event_type_t&lt;&#x2F;span&gt;&lt;span&gt; events&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;[]&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt; =&lt;&#x2F;span&gt;&lt;span&gt; {&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;        ES_EVENT_TYPE_NOTIFY_EXEC,     ES_EVENT_TYPE_NOTIFY_EXIT,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;        ES_EVENT_TYPE_NOTIFY_CREATE,   ES_EVENT_TYPE_NOTIFY_CLOSE,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;        ES_EVENT_TYPE_NOTIFY_TRUNCATE, ES_EVENT_TYPE_NOTIFY_UNLINK,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;        ES_EVENT_TYPE_NOTIFY_RENAME,   ES_EVENT_TYPE_NOTIFY_MMAP,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;That reads like a config file. On Windows the equivalent capability is a
+signed kernel driver with a registered altitude and a callback running at
+elevated IRQL. On macOS it’s an array of enum values passed to a library
+function from a process that could, in principle, be a shell script’s
+child. The complexity didn’t vanish — Apple absorbed it, and now maintains
+it on your behalf.&lt;&#x2F;p&gt;
+&lt;p&gt;The tax is subtle and it comes due in two places.&lt;&#x2F;p&gt;
+&lt;p&gt;The first is that &lt;strong&gt;the broker decides what exists&lt;&#x2F;strong&gt;. On Windows or Linux
+you can, with enough determination, hook something nobody anticipated you’d
+want. Under ES, if Apple hasn’t modeled an event type, that event is not
+merely hard to observe — it is unobservable, and your options are a feature
+request and a wait measured in major OS releases.&lt;&#x2F;p&gt;
+&lt;p&gt;The interesting flip side is that a broker can also model things the other
+platforms &lt;em&gt;don’t have words for&lt;&#x2F;em&gt;. Two entries further down that same array:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;c&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;        &#x2F;* Mach task-port acquisition (macOS 10.15 &#x2F; 12.0). CONTROL + READ&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;         * only — INSPECT&#x2F;NAME are dominated by diagnostics tooling. *&#x2F;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;        ES_EVENT_TYPE_NOTIFY_GET_TASK, ES_EVENT_TYPE_NOTIFY_GET_TASK_READ,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;A Mach task port is a capability handle to another process’s address space.
+Acquiring one is the macOS injection primitive — the thing that stands
+where &lt;code&gt;OpenProcess&lt;&#x2F;code&gt; + &lt;code&gt;WriteProcessMemory&lt;&#x2F;code&gt; stands on Windows. There is no
+equivalent event on the other two platforms in this codebase, because Mach
+ports are a macOS abstraction and Apple chose to model access to them
+explicitly. The broker can be &lt;em&gt;more&lt;&#x2F;em&gt; expressive than raw hooking, when the
+broker understands its own OS’s semantics better than an outsider would.&lt;&#x2F;p&gt;
+&lt;p&gt;The second tax is the one that turned out to matter most in practice, and
+it’s the reason I ended up thinking about all of this in terms of &lt;em&gt;time&lt;&#x2F;em&gt;.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;where-your-mistakes-surface&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#where-your-mistakes-surface&quot; aria-label=&quot;Anchor link for: where-your-mistakes-surface&quot;&gt;Where your mistakes surface&lt;&#x2F;a&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;Under Endpoint Security, permission is not a runtime check that returns an
+error code. Permission is an &lt;strong&gt;entitlement&lt;&#x2F;strong&gt;: a cryptographic grant, issued
+by Apple, to a specific developer account, after a review. Your binary
+carries it in its signature.&lt;&#x2F;p&gt;
+&lt;p&gt;Development builds can fake this. With System Integrity Protection relaxed
+and &lt;code&gt;amfi_get_out_of_my_way&lt;&#x2F;code&gt; set, an ad-hoc-signed client with a synthetic
+entitlement will be accepted by &lt;code&gt;es_new_client&lt;&#x2F;code&gt;, and events flow. Every
+category in that array above is delivered on my dev VM.&lt;&#x2F;p&gt;
+&lt;p&gt;Except one. TCC-modification events — notifications that a privacy grant
+(camera, microphone, full disk access) changed — are gated more strictly
+than the rest. The client connects. The subscription succeeds. No error is
+returned anywhere. And no &lt;code&gt;TCC_MODIFY&lt;&#x2F;code&gt; event is ever delivered, because
+the faked entitlement clears the door but not that particular room.&lt;&#x2F;p&gt;
+&lt;p&gt;There is no bug to find. The code is right. The only fix is a genuine
+Apple-issued entitlement, which is a business process, not an engineering
+one.&lt;&#x2F;p&gt;
+&lt;p&gt;And that, finally, is the pattern I want to leave you with. Line the three
+models up by &lt;em&gt;when a mistake becomes visible&lt;&#x2F;em&gt;:&lt;&#x2F;p&gt;
+&lt;table&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;&lt;&#x2F;th&gt;&lt;th&gt;Trust model&lt;&#x2F;th&gt;&lt;th&gt;Mistakes surface at&lt;&#x2F;th&gt;&lt;th&gt;Failure mode&lt;&#x2F;th&gt;&lt;&#x2F;tr&gt;&lt;&#x2F;thead&gt;&lt;tbody&gt;
+&lt;tr&gt;&lt;td&gt;&lt;strong&gt;Windows&lt;&#x2F;strong&gt;&lt;&#x2F;td&gt;&lt;td&gt;Ceremony — sign, register, enter&lt;&#x2F;td&gt;&lt;td&gt;&lt;strong&gt;Runtime&lt;&#x2F;strong&gt;, on the customer’s machine&lt;&#x2F;td&gt;&lt;td&gt;Loud and catastrophic (bugcheck)&lt;&#x2F;td&gt;&lt;&#x2F;tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;strong&gt;Linux&lt;&#x2F;strong&gt;&lt;&#x2F;td&gt;&lt;td&gt;Proof — submit to the verifier&lt;&#x2F;td&gt;&lt;td&gt;&lt;strong&gt;Load time&lt;&#x2F;strong&gt;, on your machine&lt;&#x2F;td&gt;&lt;td&gt;Loud and safe (rejection with a trace)&lt;&#x2F;td&gt;&lt;&#x2F;tr&gt;
+&lt;tr&gt;&lt;td&gt;&lt;strong&gt;macOS&lt;&#x2F;strong&gt;&lt;&#x2F;td&gt;&lt;td&gt;Brokerage — Apple looks for you&lt;&#x2F;td&gt;&lt;td&gt;&lt;strong&gt;Deployment&lt;&#x2F;strong&gt;, at organizational scale&lt;&#x2F;td&gt;&lt;td&gt;&lt;em&gt;Silent&lt;&#x2F;em&gt; — an event class that simply never arrives&lt;&#x2F;td&gt;&lt;&#x2F;tr&gt;
+&lt;&#x2F;tbody&gt;&lt;&#x2F;table&gt;
+&lt;p&gt;Windows fails at the worst time in the worst way, but tells you
+unambiguously. Linux fails at the best possible time, before anything is at
+risk, and the price is that you argue with a proof checker for an afternoon.
+macOS fails at the strangest time — long after the code is written and
+tested — and the failure is an absence, which is the hardest thing in the
+world to notice.&lt;&#x2F;p&gt;
+&lt;p&gt;Every one of these is a coherent engineering position. But they aren’t
+interchangeable, and this is why an EDR agent cannot have one unified
+sensor abstraction that “handles platform differences.” The differences
+aren’t in the API surface. They’re in what the platform believes about you,
+and belief doesn’t refactor.&lt;&#x2F;p&gt;
+&lt;p&gt;What &lt;em&gt;can&lt;&#x2F;em&gt; be unified is everything downstream. Once an event exists — a
+process started, a file was written, a task port was acquired — the
+questions become identical everywhere: how do you not lose it, how do you
+name the thing it happened to, who is allowed to act on it. Three sensors,
+three trust models, one contract from there on.&lt;&#x2F;p&gt;
+&lt;p&gt;The next essay follows that contract downstream and asks why telemetry
+pipelines keep converging on the same shape.&lt;&#x2F;p&gt;
+</content>
+        
+    </entry>
+    <entry xml:lang="en">
+        <title>Building a Mini-EDR Agent - Monitoring Process Creation with ETW in C</title>
+        <published>2026-03-26T00:00:00+00:00</published>
+        <updated>2026-03-26T00:00:00+00:00</updated>
+        
+        <author>
+          <name>
+            
+              Unknown
+            
+          </name>
+        </author>
+        
+        <link rel="alternate" type="text/html" href="https://adasumizox.github.io/posts/building-a-mini-edr-agent-monitoring-process-creation-with-etw-in-c/"/>
+        <id>https://adasumizox.github.io/posts/building-a-mini-edr-agent-monitoring-process-creation-with-etw-in-c/</id>
+        
+        <content type="html" xml:base="https://adasumizox.github.io/posts/building-a-mini-edr-agent-monitoring-process-creation-with-etw-in-c/">&lt;p&gt;In my previous post, we built a mini-SIEM lab using Sysmon to gather high-quality telemetry from a Windows host. But how can an endpoint sensor observe process creation in real time without relying on Sysmon?&lt;&#x2F;p&gt;
+&lt;p&gt;One useful source is &lt;a rel=&quot;noopener external&quot; target=&quot;_blank&quot; href=&quot;https:&#x2F;&#x2F;learn.microsoft.com&#x2F;en-us&#x2F;windows&#x2F;win32&#x2F;etw&#x2F;event-tracing-portal&quot;&gt;&lt;strong&gt;Event Tracing for Windows (ETW)&lt;&#x2F;strong&gt;&lt;&#x2F;a&gt;, Windows’ general-purpose tracing infrastructure. Production EDR products normally combine several user-mode and kernel-mode telemetry sources; ETW is one source rather than the mechanism behind every product.&lt;&#x2F;p&gt;
+&lt;p&gt;In this post, we will ditch the pre-built collection tools and write a small EDR-style sensor in C. It will subscribe to the Windows Kernel Process provider and print an event whenever a new process starts.&lt;&#x2F;p&gt;
+&lt;p&gt;Before diving into the code, let’s look at the three main parts of ETW:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Providers&lt;&#x2F;strong&gt; - The components generating logs (e.g. the Windows Kernel).&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;strong&gt;Controllers&lt;&#x2F;strong&gt; - Applications that start and configure tracing sessions.&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;strong&gt;Consumers&lt;&#x2F;strong&gt; - Applications that read events from real-time sessions or &lt;code&gt;.etl&lt;&#x2F;code&gt; files.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;Our C program will act as both a controller (creating the trace session) and a consumer (parsing and printing events).&lt;&#x2F;p&gt;
+&lt;p&gt;Let’s build it step-by-step.&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;phase-1-setting-up-the-etw-session-the-controller&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#phase-1-setting-up-the-etw-session-the-controller&quot; aria-label=&quot;Anchor link for: phase-1-setting-up-the-etw-session-the-controller&quot;&gt;Phase 1: Setting up the ETW Session (The Controller)&lt;&#x2F;a&gt;&lt;&#x2F;h3&gt;
+&lt;p&gt;To receive events, we first need to start an ETW trace session and define the GUID of the provider we want to enable.&lt;&#x2F;p&gt;
+&lt;p&gt;In our case, it is &lt;code&gt;Microsoft-Windows-Kernel-Process&lt;&#x2F;code&gt;, whose GUID is &lt;a rel=&quot;noopener external&quot; target=&quot;_blank&quot; href=&quot;https:&#x2F;&#x2F;github.com&#x2F;repnz&#x2F;etw-providers-docs&#x2F;blob&#x2F;master&#x2F;Manifests-Win10-18990&#x2F;Microsoft-Windows-Kernel-Process.xml&quot;&gt;&lt;code&gt;{22FB2CD6-0E7B-422B-A0C7-2FAD1F0E716}&lt;&#x2F;code&gt;&lt;&#x2F;a&gt;.&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;c&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #72F1B8;&quot;&gt;#define&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt; _WIN32_WINNT&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; 0x0600&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #72F1B8;&quot;&gt;#include&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;lt;windows.h&amp;gt;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #72F1B8;&quot;&gt;#include&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;lt;stdio.h&amp;gt;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #72F1B8;&quot;&gt;#include&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;lt;evntrace.h&amp;gt;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #72F1B8;&quot;&gt;#include&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;lt;evntcons.h&amp;gt;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #72F1B8;&quot;&gt;#include&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt; &amp;lt;tdh.h&amp;gt;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;#pragma comment&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;lib&lt;&#x2F;span&gt;&lt;span&gt;, &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;tdh.lib&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;)&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;#pragma comment&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;lib&lt;&#x2F;span&gt;&lt;span&gt;, &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;advapi32.lib&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;)&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FE4450;&quot;&gt;static const&lt;&#x2F;span&gt;&lt;span&gt; GUID ProviderGuid &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;{&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; 0x22FB2CD6&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; 0x0E7B&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; 0x422B&lt;&#x2F;span&gt;&lt;span&gt;, {&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; 0xA0&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; 0xC7&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; 0x2F&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; 0xAD&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; 0x1F&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; 0xD0&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; 0xE7&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; 0x16&lt;&#x2F;span&gt;&lt;span&gt; } };&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;In &lt;code&gt;main&lt;&#x2F;code&gt;, we configure the &lt;code&gt;EVENT_TRACE_PROPERTIES&lt;&#x2F;code&gt; structure. &lt;code&gt;EVENT_TRACE_REAL_TIME_MODE&lt;&#x2F;code&gt; makes events available to a real-time consumer instead of writing them to a disk file.&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;c&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F; Setup session properties&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;TRACE_PROPERTIES sessionProps &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span&gt; {&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; 0&lt;&#x2F;span&gt;&lt;span&gt; };&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;sessionProps.Properties.Wnode.BufferSize &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; sizeof&lt;&#x2F;span&gt;&lt;span&gt;(TRACE_PROPERTIES);&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;sessionProps.Properties.Wnode.Flags &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span&gt; WNODE_FLAG_TRACED_GUID;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;sessionProps.Properties.Wnode.ClientContext &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; 1&lt;&#x2F;span&gt;&lt;span&gt;; &lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;sessionProps.Properties.LogFileMode &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span&gt; EVENT_TRACE_REAL_TIME_MODE;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt; &#x2F;&#x2F; Crucial for EDR&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;sessionProps.Properties.LoggerNameOffset &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt; offsetof&lt;&#x2F;span&gt;&lt;span&gt;(TRACE_PROPERTIES, SessionName);&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;&#x2F;&#x2F; Start the trace session (Requires Administrator privileges!)&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;ULONG status &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt; StartTraceW&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;&amp;amp;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;font-style: italic;&quot;&gt;g_hSession&lt;&#x2F;span&gt;&lt;span&gt;, g_SessionName,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; &amp;amp;&lt;&#x2F;span&gt;&lt;span&gt;sessionProps.Properties);&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;&lt;h3 id=&quot;phase-2-subscribing-to-kernel-events&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#phase-2-subscribing-to-kernel-events&quot; aria-label=&quot;Anchor link for: phase-2-subscribing-to-kernel-events&quot;&gt;Phase 2: Subscribing to Kernel Events&lt;&#x2F;a&gt;&lt;&#x2F;h3&gt;
+&lt;p&gt;Starting a session is not enough. We must enable our provider for that session with &lt;code&gt;EnableTraceEx2&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;c&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;status &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt; EnableTraceEx2&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;    g_hSession,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;    &amp;amp;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;font-style: italic;&quot;&gt;ProviderGuid&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;    EVENT_CONTROL_CODE_ENABLE_PROVIDER,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;    TRACE_LEVEL_VERBOSE,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt;    0x10&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt; &#x2F;&#x2F; WINEVENT_KEYWORD_PROCESS&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt;    0&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt;    0&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt;    NULL&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;);&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;&lt;h3 id=&quot;phase-3-consuming-the-events-the-consumer&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#phase-3-consuming-the-events-the-consumer&quot; aria-label=&quot;Anchor link for: phase-3-consuming-the-events-the-consumer&quot;&gt;Phase 3: Consuming the Events (The Consumer)&lt;&#x2F;a&gt;&lt;&#x2F;h3&gt;
+&lt;p&gt;Now that events are flowing into the session, we need to read them. We set up an &lt;code&gt;EVENT_TRACE_LOGFILEW&lt;&#x2F;code&gt; structure, point it to our session name, and provide an &lt;code&gt;EventRecordCallback&lt;&#x2F;code&gt; function that ETW calls for each event.&lt;&#x2F;p&gt;
+&lt;p&gt;Finally, we call &lt;code&gt;ProcessTrace()&lt;&#x2F;code&gt;. This function blocks while it processes events and invokes our callback, until the trace is stopped.&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;c&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;EVENT_TRACE_LOGFILEW logFile &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span&gt; {&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; 0&lt;&#x2F;span&gt;&lt;span&gt; };&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;logFile.LoggerName &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span&gt; g_SessionName;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;logFile.ProcessTraceMode &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span&gt; PROCESS_TRACE_MODE_REAL_TIME &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;|&lt;&#x2F;span&gt;&lt;span&gt; PROCESS_TRACE_MODE_EVENT_RECORD;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;logFile.EventRecordCallback &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span&gt; EventRecordCallback;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt; &#x2F;&#x2F; The function that handles data&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;TRACEHANDLE hTrace &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt; OpenTraceW&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;&amp;amp;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;font-style: italic;&quot;&gt;logFile&lt;&#x2F;span&gt;&lt;span&gt;);&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;printf&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;Listening for Process Starts... (Press Ctrl+C to stop)&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;\n&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;);&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;status &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FFFFFFEE;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt; ProcessTrace&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;&amp;amp;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;font-style: italic;&quot;&gt;hTrace&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; 1&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; NULL&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; NULL&lt;&#x2F;span&gt;&lt;span&gt;);&lt;&#x2F;span&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt; &#x2F;&#x2F; Blocks and processes events&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;&lt;h3 id=&quot;phase-4-parsing-the-payload-with-tdh&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#phase-4-parsing-the-payload-with-tdh&quot; aria-label=&quot;Anchor link for: phase-4-parsing-the-payload-with-tdh&quot;&gt;Phase 4: Parsing the Payload with TDH&lt;&#x2F;a&gt;&lt;&#x2F;h3&gt;
+&lt;p&gt;Raw ETW data is an unformatted binary payload. Parsing it manually is error-prone, and its layout can change with Windows updates. Thankfully, Microsoft provides the &lt;strong&gt;Trace Data Helper (TDH)&lt;&#x2F;strong&gt; API, which uses the provider’s manifest to parse the binary payload into readable strings and integers.&lt;&#x2F;p&gt;
+&lt;p&gt;In &lt;code&gt;EventRecordCallback&lt;&#x2F;code&gt;, we verify the provider and select event ID &lt;code&gt;1&lt;&#x2F;code&gt;, which this provider’s manifest defines as process start. We then use &lt;code&gt;TdhGetProperty&lt;&#x2F;code&gt; to extract fields such as &lt;code&gt;ProcessID&lt;&#x2F;code&gt; and &lt;code&gt;ImageName&lt;&#x2F;code&gt;. Event schemas can vary by provider version, so production code should inspect the event metadata rather than assume every Windows build exposes an identical payload.&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;c&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;VOID WINAPI &lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;EventRecordCallback&lt;&#x2F;span&gt;&lt;span&gt;(PEVENT_RECORD &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;font-style: italic;&quot;&gt;pEvent&lt;&#x2F;span&gt;&lt;span&gt;)&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;{&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;    if&lt;&#x2F;span&gt;&lt;span&gt; (&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;memcmp&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;&amp;amp;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;&quot;&gt;pEvent&lt;&#x2F;span&gt;&lt;span&gt;-&amp;gt;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;&quot;&gt;EventHeader&lt;&#x2F;span&gt;&lt;span&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;&quot;&gt;ProviderId&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; &amp;amp;&lt;&#x2F;span&gt;&lt;span&gt;ProviderGuid,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; sizeof&lt;&#x2F;span&gt;&lt;span&gt;(GUID))&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; !=&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; 0&lt;&#x2F;span&gt;&lt;span&gt;)&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; return&lt;&#x2F;span&gt;&lt;span&gt;;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;    &#x2F;&#x2F; Event ID 1 == Process Start&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;    if&lt;&#x2F;span&gt;&lt;span&gt; (&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;&quot;&gt;pEvent&lt;&#x2F;span&gt;&lt;span&gt;-&amp;gt;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;&quot;&gt;EventHeader&lt;&#x2F;span&gt;&lt;span&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;&quot;&gt;EventDescriptor&lt;&#x2F;span&gt;&lt;span&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;&quot;&gt;Id&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; ==&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; 1&lt;&#x2F;span&gt;&lt;span&gt;)&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;    {&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;        printf&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;\n&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;[+] Process Started!&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;\n&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;);&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;        printf&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;  ProcessID: &lt;&#x2F;span&gt;&lt;span style=&quot;color: #72F1B8;font-style: italic;&quot;&gt;%lu&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;\n&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt; GetUint32Property&lt;&#x2F;span&gt;&lt;span&gt;(pEvent, L&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;ProcessID&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;));&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;        printf&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;  ParentProcessID: &lt;&#x2F;span&gt;&lt;span style=&quot;color: #72F1B8;font-style: italic;&quot;&gt;%lu&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;\n&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt; GetUint32Property&lt;&#x2F;span&gt;&lt;span&gt;(pEvent, L&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;ParentProcessID&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;));&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;        PrintStringProperty&lt;&#x2F;span&gt;&lt;span&gt;(pEvent, L&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;ImageName&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;);&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;        printf&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;--------------------------------------------------&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;\n&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;);&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;    }&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;}&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;&lt;em&gt;The complete program should include &lt;code&gt;GetUint32Property&lt;&#x2F;code&gt; and &lt;code&gt;PrintStringProperty&lt;&#x2F;code&gt; helpers that wrap &lt;code&gt;TdhGetProperty&lt;&#x2F;code&gt;, plus error handling for missing properties. The excerpts here focus on the ETW control flow.&lt;&#x2F;em&gt;&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;graceful-shutdown&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#graceful-shutdown&quot; aria-label=&quot;Anchor link for: graceful-shutdown&quot;&gt;Graceful Shutdown&lt;&#x2F;a&gt;&lt;&#x2F;h3&gt;
+&lt;p&gt;Real-time ETW sessions are system-wide objects. If our program exits without stopping its session, that session can remain active. To prevent this, we handle &lt;code&gt;Ctrl+C&lt;&#x2F;code&gt; and stop it with &lt;code&gt;ControlTraceW&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;c&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;BOOL WINAPI &lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;ConsoleHandler&lt;&#x2F;span&gt;&lt;span&gt;(DWORD &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;font-style: italic;&quot;&gt;signal&lt;&#x2F;span&gt;&lt;span&gt;) {&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;    if&lt;&#x2F;span&gt;&lt;span&gt; (signal &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;==&lt;&#x2F;span&gt;&lt;span&gt; CTRL_C_EVENT &lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;&amp;amp;&amp;amp;&lt;&#x2F;span&gt;&lt;span&gt; g_hSession) {&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;        printf&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;\n&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;Stopping trace session gracefully...&lt;&#x2F;span&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;\n&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF8B39;&quot;&gt;&amp;quot;&lt;&#x2F;span&gt;&lt;span&gt;);&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #848BBD;font-style: italic;&quot;&gt;        &#x2F;&#x2F; Tell the kernel to stop our session&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #36F9F6;&quot;&gt;        ControlTraceW&lt;&#x2F;span&gt;&lt;span&gt;(g_hSession, g_SessionName,&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt; &amp;amp;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;&quot;&gt;stopProps&lt;&#x2F;span&gt;&lt;span&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;&quot;&gt;Properties&lt;&#x2F;span&gt;&lt;span&gt;, EVENT_TRACE_CONTROL_STOP);&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;        return&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; TRUE&lt;&#x2F;span&gt;&lt;span&gt;;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;    }&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span style=&quot;color: #FEDE5D;&quot;&gt;    return&lt;&#x2F;span&gt;&lt;span style=&quot;color: #F97E72;&quot;&gt; FALSE&lt;&#x2F;span&gt;&lt;span&gt;;&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;}&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;&lt;h3 id=&quot;compiling-and-running&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#compiling-and-running&quot; aria-label=&quot;Anchor link for: compiling-and-running&quot;&gt;Compiling and Running&lt;&#x2F;a&gt;&lt;&#x2F;h3&gt;
+&lt;p&gt;To compile this sensor, use the MSVC compiler included with Visual Studio. Open the &lt;strong&gt;x64 Native Tools Command Prompt&lt;&#x2F;strong&gt; and run:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;vb&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;cl.&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;&quot;&gt;exe&lt;&#x2F;span&gt;&lt;span&gt; &#x2F;&lt;&#x2F;span&gt;&lt;span style=&quot;color: #FF7EDB;&quot;&gt;O2&lt;&#x2F;span&gt;&lt;span&gt; mini_edr.c&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;&lt;strong&gt;Testing the Agent:&lt;&#x2F;strong&gt;
+Because ETW interacts directly with the Windows Kernel, &lt;strong&gt;you must run this executable as an Administrator&lt;&#x2F;strong&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;Open an elevated command prompt, run &lt;code&gt;mini_edr.exe&lt;&#x2F;code&gt;, and then open an application like &lt;code&gt;notepad.exe&lt;&#x2F;code&gt; or &lt;code&gt;calc.exe&lt;&#x2F;code&gt;. You will see your mini-EDR catch the execution:&lt;&#x2F;p&gt;
+&lt;pre class=&quot;giallo&quot; style=&quot;color: #FFFFFF; background-color: #262335;&quot;&gt;&lt;code data-lang=&quot;plain&quot;&gt;&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;PS &amp;gt; .\mini_edr.exe&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;Trace Session &amp;#39;ProcMonTrace_18872&amp;#39; Started.&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;Listening for Process Starts... (Press Ctrl+C to stop)&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;[+] Process Started!&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;  ProcessID: 18956&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;  ParentProcessID: 1600&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;  ImageName: \Device\HarddiskVolume3\Windows\System32\dllhost.exe&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;--------------------------------------------------&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;[+] Process Started!&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;  ProcessID: 19012&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;  ParentProcessID: 6692&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;  ImageName: \Device\HarddiskVolume3\Program Files\WindowsApps\Microsoft.WindowsNotepad_11.2512.26.0_x64__8wekyb3d8bbwe\Notepad\Notepad.exe&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;--------------------------------------------------&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;[+] Process Started!&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;  ProcessID: 19200&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;  ParentProcessID: 2040&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;  ImageName: \Device\HarddiskVolume3\Program Files\WindowsApps\Microsoft.WindowsCalculator_11.2508.4.0_x64__8wekyb3d8bbwe\CalculatorApp.exe&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;
+&lt;span class=&quot;giallo-l&quot;&gt;&lt;span&gt;--------------------------------------------------&lt;&#x2F;span&gt;&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;&lt;h3 id=&quot;conclusion&quot;&gt;&lt;a class=&quot;zola-anchor&quot; href=&quot;#conclusion&quot; aria-label=&quot;Anchor link for: conclusion&quot;&gt;Conclusion&lt;&#x2F;a&gt;&lt;&#x2F;h3&gt;
+&lt;p&gt;Congratulations! You’ve just written a core component of an EDR engine.&lt;&#x2F;p&gt;
+&lt;p&gt;Commercial EDRs add many layers: additional telemetry sources, tamper protection, buffering, enrichment, correlation, and remote analysis. This small consumer is not an EDR by itself, but it demonstrates one practical way to collect process telemetry on Windows.&lt;&#x2F;p&gt;
+&lt;p&gt;In a future lab, we can compare this approach with a signed kernel driver that uses process-creation callbacks.&lt;&#x2F;p&gt;
+</content>
+        
+    </entry>
+</feed>
